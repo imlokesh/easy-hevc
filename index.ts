@@ -10,11 +10,14 @@ import clide from "@imlokesh/clide";
 // ==========================================
 
 enum Resolution {
+  R4K = "2160",
+  R2K = "1440",
   R1080 = "1080",
   R720 = "720",
+  R540 = "540",
   R480 = "480",
+  R360 = "360",
 }
-
 interface ConversionOptions {
   input: string;
   suffix: string;
@@ -486,7 +489,7 @@ const main = async () => {
           },
           resolution: {
             type: "string",
-            choices: ["1080", "720", "480"],
+            choices: ["2160", "1440", "1080", "720", "540", "480", "360"],
             default: "720",
             env: "HEVC_RES",
             description: "Max height",
