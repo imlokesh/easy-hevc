@@ -1,8 +1,9 @@
-import clide from "@imlokesh/clide";
 import { spawn } from "node:child_process";
-import fs from "node:fs/promises";
 import { constants } from "node:fs";
+import fs from "node:fs/promises";
 import path from "node:path";
+import * as readline from "node:readline";
+import clide from "@imlokesh/clide";
 
 // ==========================================
 // 1. Types & Interfaces
@@ -21,16 +22,17 @@ interface ConversionOptions {
   crf: number;
   preset: string;
   deleteOriginal: boolean;
+  preserveDates: boolean;
 }
 
-interface FileResult {
-  file: string;
-  savedBytes: number;
-  status: "success" | "skipped" | "failed" | "grew";
+interface FinalizeOptions {
+  input: string;
+  suffix: string;
+  force: boolean;
 }
 
 // ==========================================
-// 2. Logger Service
+// 2. Logger & UI Service
 // ==========================================
 
 const Logger = {
@@ -49,7 +51,20 @@ const Logger = {
     const k = 1024;
     const sizes = ["Bytes", "KB", "MB", "GB"];
     const i = Math.floor(Math.log(Math.abs(bytes)) / Math.log(k));
-    return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
+    return `${parseFloat((bytes / k ** i).toFixed(2))} ${sizes[i]}`;
+  },
+
+  confirm: (query: string): Promise<boolean> => {
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+    return new Promise((resolve) => {
+      rl.question(`\n❓ ${query} [y/N]: `, (answer) => {
+        rl.close();
+        resolve(answer.toLowerCase() === "y" || answer.toLowerCase() === "yes");
+      });
+    });
   },
 };
 
@@ -58,7 +73,6 @@ const Logger = {
 // ==========================================
 
 const FFmpegService = {
-  /** Check if binary exists in PATH */
   checkBinary: (binary: string): Promise<void> => {
     return new Promise((resolve, reject) => {
       const proc = spawn(binary, ["-version"]);
@@ -67,7 +81,6 @@ const FFmpegService = {
     });
   },
 
-  /** Get video height */
   getHeight: (filePath: string): Promise<number> => {
     return new Promise((resolve) => {
       const args = [
@@ -83,25 +96,28 @@ const FFmpegService = {
       ];
       const proc = spawn("ffprobe", args);
       let data = "";
-      proc.stdout.on("data", (chunk) => (data += chunk));
+      proc.stdout.on("data", (chunk) => {
+        data += chunk;
+      });
       proc.on("close", () => {
-        const height = parseInt(data.trim());
-        resolve(isNaN(height) ? 0 : height);
+        const height = parseInt(data.trim(), 10);
+        resolve(Number.isNaN(height) ? 0 : height);
       });
     });
   },
 
-  /** Run the conversion process */
-  convert: (
+  // Refactored to avoid async Promise executor
+  convert: async (
     input: string,
     output: string,
     opts: ConversionOptions,
     targetHeight: number,
   ): Promise<void> => {
-    return new Promise(async (resolve, reject) => {
-      const inputHeight = await FFmpegService.getHeight(input);
+    // 1. Await height check first
+    const inputHeight = await FFmpegService.getHeight(input);
 
-      // Determine filters
+    // 2. Return the Promise for the spawn process
+    return new Promise((resolve, reject) => {
       const args = [
         "-i",
         input,
@@ -130,7 +146,6 @@ const FFmpegService = {
 
       const proc = spawn("ffmpeg", args);
 
-      // Progress monitoring
       proc.stderr.on("data", (chunk) => {
         const line = chunk.toString();
         const timeMatch = line.match(/time=(\S+)/);
@@ -166,7 +181,6 @@ const FileService = {
     ".mpeg",
   ]),
 
-  /** Recursively find all video files */
   scan: async (dir: string): Promise<string[]> => {
     let results: string[] = [];
     try {
@@ -185,7 +199,7 @@ const FileService = {
           results.push(fullPath);
         }
       }
-    } catch (e) {
+    } catch {
       Logger.error(`Could not access path: ${dir}`);
     }
     return results;
@@ -201,78 +215,252 @@ const FileService = {
   },
 
   getSize: async (filePath: string) => (await fs.stat(filePath)).size,
+
+  copyStats: async (source: string, dest: string) => {
+    try {
+      const stats = await fs.stat(source);
+      await fs.utimes(dest, stats.atime, stats.mtime);
+    } catch {
+      Logger.warn("Could not copy file timestamps.");
+    }
+  },
 };
 
 // ==========================================
-// 5. Core Logic
+// 5. Command Logic: CONVERT
 // ==========================================
 
-const processFile = async (
-  file: string,
-  opts: ConversionOptions,
-  idx: number,
-  total: number,
-): Promise<FileResult> => {
-  const fileInfo = path.parse(file);
-  const baseName = fileInfo.name;
-
-  Logger.divider();
-  Logger.info(`[${idx}/${total}] Processing: ${fileInfo.base}`);
-
-  // Check 1: Is this already a converted file?
-  if (baseName.endsWith(opts.suffix)) {
-    Logger.skip("Skipping: File appears to be an output file.");
-    return { file, savedBytes: 0, status: "skipped" };
-  }
-
-  // Check 2: Does the output file already exist?
-  const outputName = `${baseName}${opts.suffix}.mkv`;
-  const tempName = `${baseName}${opts.suffix}.temp.mkv`;
-  const outputPath = path.join(fileInfo.dir, outputName);
-  const tempPath = path.join(fileInfo.dir, tempName);
-
-  if (await FileService.exists(outputPath)) {
-    Logger.skip("Skipping: Converted file already exists.");
-    return { file, savedBytes: 0, status: "skipped" };
-  }
+const runConvert = async (opts: ConversionOptions) => {
+  Logger.header("Starting Video Compression");
 
   try {
-    // Convert
-    await FFmpegService.convert(file, tempPath, opts, parseInt(opts.resolution));
-
-    // Verify Sizes
-    const originalSize = await FileService.getSize(file);
-    const newSize = await FileService.getSize(tempPath);
-    const savedBytes = originalSize - newSize;
-    const savedPercent = ((savedBytes / originalSize) * 100).toFixed(1);
-
-    if (savedBytes > 0) {
-      Logger.success(`Done! ${Logger.formatBytes(originalSize)} -> ${Logger.formatBytes(newSize)}`);
-      Logger.success(`Saved: ${Logger.formatBytes(savedBytes)} (${savedPercent}%)`);
-
-      await fs.rename(tempPath, outputPath);
-
-      if (opts.deleteOriginal) {
-        await fs.unlink(file);
-        Logger.info("🗑️  Original file deleted.");
-      }
-      return { file, savedBytes, status: "success" };
-    } else {
-      Logger.warn(`File grew by ${Logger.formatBytes(Math.abs(savedBytes))}. keeping original.`);
-      // We still rename it to mark it as processed, but we DO NOT delete original
-      await fs.rename(tempPath, outputPath);
-      return { file, savedBytes: 0, status: "grew" };
-    }
-  } catch (err: any) {
-    Logger.error(`Conversion Failed: ${err.message}`);
-    // Cleanup temp
-    if (await FileService.exists(tempPath)) await fs.unlink(tempPath);
-    return { file, savedBytes: 0, status: "failed" };
+    await FFmpegService.checkBinary("ffmpeg");
+    await FFmpegService.checkBinary("ffprobe");
+  } catch (e: unknown) {
+    if (e instanceof Error) Logger.error(e.message);
+    process.exit(1);
   }
+
+  const files = await FileService.scan(opts.input);
+  if (files.length === 0) {
+    Logger.warn("No video files found.");
+    process.exit(0);
+  }
+
+  Logger.info(`Found ${files.length} files. Target: ${opts.resolution}p, CRF: ${opts.crf}`);
+
+  let totalSaved = 0;
+  let successCount = 0;
+
+  for (let i = 0; i < files.length; i++) {
+    const file = files[i];
+    const fileInfo = path.parse(file);
+    const baseName = fileInfo.name;
+
+    Logger.divider();
+    Logger.info(`[${i + 1}/${files.length}] Processing: ${fileInfo.base}`);
+
+    if (baseName.endsWith(opts.suffix)) {
+      Logger.skip("Skipping: File appears to be an output file.");
+      continue;
+    }
+
+    const outputName = `${baseName}${opts.suffix}.mkv`;
+    const tempName = `${baseName}${opts.suffix}.temp.mkv`;
+    const outputPath = path.join(fileInfo.dir, outputName);
+    const tempPath = path.join(fileInfo.dir, tempName);
+
+    if (await FileService.exists(outputPath)) {
+      Logger.skip("Skipping: Converted file already exists.");
+      continue;
+    }
+
+    try {
+      await FFmpegService.convert(file, tempPath, opts, parseInt(opts.resolution, 10));
+
+      if (opts.preserveDates) {
+        await FileService.copyStats(file, tempPath);
+        Logger.info("📅 Timestamps preserved.");
+      }
+
+      const originalSize = await FileService.getSize(file);
+      const newSize = await FileService.getSize(tempPath);
+      const savedBytes = originalSize - newSize;
+      const savedPercent = ((savedBytes / originalSize) * 100).toFixed(1);
+
+      if (savedBytes > 0) {
+        Logger.success(
+          `Done! ${Logger.formatBytes(originalSize)} -> ${Logger.formatBytes(newSize)}`,
+        );
+        Logger.success(`Saved: ${Logger.formatBytes(savedBytes)} (${savedPercent}%)`);
+
+        await fs.rename(tempPath, outputPath);
+
+        if (opts.deleteOriginal) {
+          await fs.unlink(file);
+          Logger.info("🗑️  Original file deleted.");
+        }
+        totalSaved += savedBytes;
+        successCount++;
+      } else {
+        Logger.warn(`File grew by ${Logger.formatBytes(Math.abs(savedBytes))}. keeping original.`);
+        await fs.rename(tempPath, outputPath);
+      }
+    } catch (err: unknown) {
+      if (err instanceof Error) {
+        Logger.error(`Conversion Failed: ${err.message}`);
+      }
+      if (await FileService.exists(tempPath)) await fs.unlink(tempPath);
+    }
+  }
+
+  Logger.header("Summary");
+  Logger.info(`Processed: ${files.length}`);
+  Logger.success(`Successful: ${successCount}`);
+  Logger.info(`Total Space Saved: ${Logger.formatBytes(totalSaved)}`);
 };
 
 // ==========================================
-// 6. Main Entry Point
+// 6. Command Logic: FINALIZE
+// ==========================================
+
+const runFinalize = async (opts: FinalizeOptions) => {
+  Logger.header("Finalize / Cleanup Mode");
+  Logger.info(`Scanning: ${opts.input}`);
+  Logger.info(`Looking for files with suffix: "${opts.suffix}"`);
+
+  const allFiles = await FileService.scan(opts.input);
+
+  // Categorize files
+  const convertedFiles: string[] = [];
+  const unconvertedFiles: string[] = [];
+
+  for (const file of allFiles) {
+    const { name } = path.parse(file);
+    if (name.endsWith(opts.suffix)) {
+      convertedFiles.push(file);
+    } else {
+      unconvertedFiles.push(file);
+    }
+  }
+
+  // Analyze Pairs
+  const toProcess: Array<{
+    original?: string;
+    converted: string;
+    cleanName: string;
+  }> = [];
+  const notConvertedYet: string[] = [];
+
+  // Check processed files
+  for (const converted of convertedFiles) {
+    const dir = path.dirname(converted);
+    const name = path.basename(converted, path.extname(converted)); // name without ext
+    const baseParams = name.substring(0, name.length - opts.suffix.length); // remove suffix
+
+    // We want the final file to be baseParams.mkv (since we converted to mkv)
+    const finalCleanPath = path.join(dir, `${baseParams}.mkv`);
+
+    // Find if original exists.
+    const original = unconvertedFiles.find((u) => {
+      const uParams = path.parse(u);
+      return uParams.dir === dir && uParams.name === baseParams;
+    });
+
+    toProcess.push({
+      original: original,
+      converted: converted,
+      cleanName: finalCleanPath,
+    });
+  }
+
+  // Check for completely untouched files
+  for (const original of unconvertedFiles) {
+    const { name } = path.parse(original);
+    // Is this file represented in our "toProcess" list?
+    const isAccountedFor = toProcess.some((p) => p.original === original);
+
+    // Also check if it looks like a temp file
+    if (!isAccountedFor && !name.includes(".temp")) {
+      notConvertedYet.push(original);
+    }
+  }
+
+  // --- Reporting ---
+  Logger.divider();
+  Logger.info(`Found ${convertedFiles.length} converted files.`);
+  Logger.info(`Found ${notConvertedYet.length} unprocessed (original) files.`);
+
+  if (notConvertedYet.length > 0) {
+    Logger.warn("WARNING: The following files have NOT been converted yet:");
+    notConvertedYet.slice(0, 5).forEach((f) => {
+      console.log(`   - ${path.basename(f)}`);
+    });
+    if (notConvertedYet.length > 5) console.log(`   ... and ${notConvertedYet.length - 5} more.`);
+
+    if (!opts.force) {
+      const proceed = await Logger.confirm(
+        "Do you want to continue cleaning up the converted files anyway?",
+      );
+      if (!proceed) {
+        console.log("Exiting.");
+        process.exit(0);
+      }
+    }
+  } else if (convertedFiles.length === 0) {
+    Logger.warn("No converted files found to finalize.");
+    process.exit(0);
+  } else {
+    if (!opts.force) {
+      const proceed = await Logger.confirm(
+        `Ready to replace ${toProcess.length} original files with converted versions? This cannot be undone.`,
+      );
+      if (!proceed) {
+        console.log("Exiting.");
+        process.exit(0);
+      }
+    }
+  }
+
+  // --- Execution ---
+  Logger.header("Executing Cleanup");
+
+  let deletedCount = 0;
+  let renamedCount = 0;
+
+  for (const item of toProcess) {
+    try {
+      // 1. If original exists, delete it
+      if (item.original) {
+        await fs.unlink(item.original);
+        deletedCount++;
+        Logger.info(`🗑️  Deleted Original: ${path.basename(item.original)}`);
+      }
+
+      // 2. Rename converted to clean name
+      // Check if we are renaming 'video_converted.mkv' -> 'video.mkv'
+      if (item.converted !== item.cleanName) {
+        await fs.rename(item.converted, item.cleanName);
+        renamedCount++;
+        Logger.success(
+          `RENAME: ${path.basename(item.converted)} -> ${path.basename(item.cleanName)}`,
+        );
+      }
+    } catch (e: unknown) {
+      if (e instanceof Error) {
+        Logger.error(`Failed on ${path.basename(item.converted)}: ${e.message}`);
+      }
+    }
+  }
+
+  Logger.divider();
+  Logger.success(`Cleanup Complete.`);
+  Logger.info(`Originals Deleted: ${deletedCount}`);
+  Logger.info(`Files Renamed: ${renamedCount}`);
+};
+
+// ==========================================
+// 7. Main Entry Point
 // ==========================================
 
 const main = async () => {
@@ -320,55 +508,58 @@ const main = async () => {
             default: false,
             description: "Delete source if smaller",
           },
+          "preserve-dates": {
+            type: "boolean",
+            default: true,
+            negatable: true,
+            description: "Keep original file modification timestamps",
+          },
+        },
+      },
+      finalize: {
+        description: "Delete originals and rename converted files to replace them.",
+        options: {
+          input: {
+            type: "string",
+            short: "i",
+            required: true,
+            description: "Input folder to clean",
+          },
+          suffix: {
+            type: "string",
+            short: "s",
+            default: "_converted",
+            env: "HEVC_SUFFIX",
+            description: "Suffix to look for",
+          },
+          force: {
+            type: "boolean",
+            short: "f",
+            default: false,
+            description: "Skip confirmation prompts",
+          },
         },
       },
     },
   });
 
-  if (command !== "convert") return;
-
-  const opts: ConversionOptions = {
-    input: commandOptions.input as string,
-    suffix: commandOptions.suffix as string,
-    resolution: commandOptions.resolution as Resolution,
-    crf: commandOptions.crf as number,
-    preset: commandOptions.preset as string,
-    deleteOriginal: commandOptions["delete-original"] as boolean,
-  };
-
-  Logger.header("Starting Video Compression");
-
-  try {
-    await FFmpegService.checkBinary("ffmpeg");
-    await FFmpegService.checkBinary("ffprobe");
-  } catch (e: any) {
-    Logger.error(e.message);
-    process.exit(1);
+  if (command === "convert") {
+    await runConvert({
+      input: commandOptions.input as string,
+      suffix: commandOptions.suffix as string,
+      resolution: commandOptions.resolution as Resolution,
+      crf: commandOptions.crf as number,
+      preset: commandOptions.preset as string,
+      deleteOriginal: commandOptions["delete-original"] as boolean,
+      preserveDates: commandOptions["preserve-dates"] as boolean,
+    });
+  } else if (command === "finalize") {
+    await runFinalize({
+      input: commandOptions.input as string,
+      suffix: commandOptions.suffix as string,
+      force: commandOptions.force as boolean,
+    });
   }
-
-  const files = await FileService.scan(opts.input);
-  if (files.length === 0) {
-    Logger.warn("No video files found.");
-    process.exit(0);
-  }
-
-  Logger.info(`Found ${files.length} files. Target: ${opts.resolution}p, CRF: ${opts.crf}`);
-
-  let totalSaved = 0;
-  let successCount = 0;
-
-  for (let i = 0; i < files.length; i++) {
-    const result = await processFile(files[i], opts, i + 1, files.length);
-    if (result.status === "success") {
-      totalSaved += result.savedBytes;
-      successCount++;
-    }
-  }
-
-  Logger.header("Summary");
-  Logger.info(`Processed: ${files.length}`);
-  Logger.success(`Successful: ${successCount}`);
-  Logger.info(`Total Space Saved: ${Logger.formatBytes(totalSaved)}`);
 };
 
 main();
