@@ -1,0 +1,17 @@
+{
+  "name": "easy-hevc",
+  "module": "index.ts",
+  "type": "module",
+  "devDependencies": {
+    "@biomejs/biome": "2.3.10",
+    "@types/bun": "latest",
+    "@types/node": "^24.10.9",
+    "typescript": "^5.9.3"
+  },
+  "peerDependencies": {
+    "typescript": "^5.9.2"
+  },
+  "dependencies": {
+    "@imlokesh/clide": "latest"
+  }
+}
