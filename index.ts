@@ -598,9 +598,9 @@ const main = async () => {
           resolution: {
             type: "string",
             choices: ["2160", "1440", "1080", "720", "540", "480", "360"],
-            default: "720",
+            default: "1080",
             env: "HEVC_RES",
-            description: "Max height",
+            description: "Output file resolution(height). ",
           },
           crf: {
             type: "number",
