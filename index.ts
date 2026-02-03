@@ -18,6 +18,7 @@ enum Resolution {
   R480 = "480",
   R360 = "360",
 }
+
 interface ConversionOptions {
   input: string;
   suffix: string;
@@ -62,11 +63,65 @@ const Logger = {
       input: process.stdin,
       output: process.stdout,
     });
+
     return new Promise((resolve) => {
-      rl.question(`\n❓ ${query} [y/N]: `, (answer) => {
-        rl.close();
-        resolve(answer.toLowerCase() === "y" || answer.toLowerCase() === "yes");
-      });
+      const ask = () => {
+        rl.question(`\n❓ ${query} [y/n]: `, (answer) => {
+          const a = answer.toLowerCase().trim();
+          if (a === "y" || a === "yes") {
+            rl.close();
+            resolve(true);
+          } else if (a === "n" || a === "no") {
+            rl.close();
+            resolve(false);
+          } else {
+            console.log("   ❌ Invalid input. Please type 'y' or 'n'.");
+            ask(); // Recursively ask again
+          }
+        });
+      };
+      ask();
+    });
+  },
+
+  askConflict: (filename: string): Promise<"yes" | "yes_all" | "no" | "no_all"> => {
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+
+    return new Promise((resolve) => {
+      console.log(
+        `\n⚠️  File "${filename}" was encoded using @imlokesh/easy-hevc. Do you want to re-convert it?`,
+      );
+      console.log("   [y] Yes (re-convert)");
+      console.log("   [n] No (skip)");
+      console.log("   [A] Yes to All");
+      console.log("   [N] No to All");
+
+      const ask = () => {
+        rl.question(`   Select option: `, (ans) => {
+          const a = ans.trim();
+
+          if (a === "A") {
+            rl.close();
+            resolve("yes_all");
+          } else if (a === "N") {
+            rl.close();
+            resolve("no_all");
+          } else if (a.toLowerCase() === "y" || a.toLowerCase() === "yes") {
+            rl.close();
+            resolve("yes");
+          } else if (a.toLowerCase() === "n" || a.toLowerCase() === "no") {
+            rl.close();
+            resolve("no");
+          } else {
+            console.log("   ❌ Invalid option. Please try again.");
+            ask(); // Recursively ask again
+          }
+        });
+      };
+      ask();
     });
   },
 };
@@ -109,17 +164,36 @@ const FFmpegService = {
     });
   },
 
-  // Refactored to avoid async Promise executor
+  getEncodingTag: (filePath: string): Promise<string | null> => {
+    return new Promise((resolve) => {
+      const args = [
+        "-v",
+        "error",
+        "-show_entries",
+        "format_tags=comment",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        filePath,
+      ];
+      const proc = spawn("ffprobe", args);
+      let data = "";
+      proc.stdout.on("data", (chunk) => {
+        data += chunk;
+      });
+      proc.on("close", () => {
+        resolve(data.trim());
+      });
+    });
+  },
+
   convert: async (
     input: string,
     output: string,
     opts: ConversionOptions,
     targetHeight: number,
   ): Promise<void> => {
-    // 1. Await height check first
     const inputHeight = await FFmpegService.getHeight(input);
 
-    // 2. Return the Promise for the spawn process
     return new Promise((resolve, reject) => {
       const args = [
         "-i",
@@ -136,6 +210,8 @@ const FFmpegService = {
         "copy",
         "-c:s",
         "copy",
+        "-metadata",
+        "comment=Encoded using @imlokesh/easy-hevc",
       ];
 
       if (inputHeight > targetHeight) {
@@ -254,6 +330,7 @@ const runConvert = async (opts: ConversionOptions) => {
 
   let totalSaved = 0;
   let successCount = 0;
+  let conflictPolicy: "ask" | "always" | "never" = "ask";
 
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
@@ -267,6 +344,37 @@ const runConvert = async (opts: ConversionOptions) => {
       Logger.skip("Skipping: File appears to be an output file.");
       continue;
     }
+
+    // --- METADATA CHECK START ---
+    const tag = await FFmpegService.getEncodingTag(file);
+    const isAlreadyConverted = tag === "Encoded using @imlokesh/easy-hevc";
+
+    if (isAlreadyConverted) {
+      if (conflictPolicy === "never") {
+        Logger.skip("Skipping previously converted file.");
+        continue;
+      }
+
+      if (conflictPolicy === "ask") {
+        const answer = await Logger.askConflict(fileInfo.base);
+
+        if (answer === "no") {
+          Logger.skip("Skipped by user.");
+          continue;
+        }
+        if (answer === "no_all") {
+          conflictPolicy = "never";
+          Logger.skip("Skipping all future conflicts.");
+          continue;
+        }
+        if (answer === "yes_all") {
+          conflictPolicy = "always";
+        }
+        // If 'yes', proceed.
+      }
+      // If 'always', proceed.
+    }
+    // --- METADATA CHECK END ---
 
     const outputName = `${baseName}${opts.suffix}.mkv`;
     const tempName = `${baseName}${opts.suffix}.temp.mkv`;
