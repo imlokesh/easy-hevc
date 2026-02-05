@@ -1,3 +1,11 @@
+/**
+ * Easy HEVC - Modern Video Compressor
+ *
+ * A CLI tool to batch convert video files to HEVC (H.265) aiming for high efficiency
+ * and reduced disk usage. Includes features for recursive scanning, conflict resolution,
+ * and safe replacement of original files.
+ */
+
 import { spawn } from "node:child_process";
 import { constants } from "node:fs";
 import fs from "node:fs/promises";
@@ -9,6 +17,7 @@ import clide from "@imlokesh/clide";
 // 1. Types & Interfaces
 // ==========================================
 
+/** Supported output resolutions for video scaling */
 enum Resolution {
   R4K = "2160",
   R2K = "1440",
@@ -19,19 +28,31 @@ enum Resolution {
   R360 = "360",
 }
 
+/** Configuration options for the conversion process */
 interface ConversionOptions {
+  /** Input directory or file path */
   input: string;
+  /** Suffix to append to converted files (e.g., "_hevc") */
   suffix: string;
+  /** Target resolution height (e.g., "1080") */
   resolution: Resolution;
+  /** Constant Rate Factor (0-51). Lower is better quality. */
   crf: number;
+  /** FFmpeg preset (e.g., "fast", "medium", "slow") */
   preset: string;
+  /** If true, deletes the original file immediately if conversion saves space */
   deleteOriginal: boolean;
+  /** If true, copies file modification times to the new file */
   preserveDates: boolean;
 }
 
+/** Configuration options for the cleanup process */
 interface FinalizeOptions {
+  /** Input directory to scan for converted/original pairs */
   input: string;
+  /** Suffix used to identify converted files */
   suffix: string;
+  /** If true, skips confirmation prompts */
   force: boolean;
 }
 
@@ -46,10 +67,20 @@ const Logger = {
   error: (msg: string) => console.error(`  ❌ ${msg}`),
   skip: (msg: string) => console.log(`  ⏭️  ${msg}`),
   progress: (msg: string) => process.stdout.write(`  ⏳ ${msg}\r`),
-  clearLine: () => process.stdout.write("\n"),
+  
+  clearLine: () => {
+    if (process.stdout.isTTY) {
+      process.stdout.clearLine(0);
+      process.stdout.cursorTo(0);
+    } else {
+      process.stdout.write("\n");
+    }
+  },
+
   header: (msg: string) => console.log(`\n=== ${msg} ===\n`),
   divider: () => console.log("-".repeat(50)),
 
+  /** Formats bytes into human-readable string (KB, MB, GB) */
   formatBytes: (bytes: number): string => {
     if (bytes === 0) return "0 Bytes";
     const k = 1024;
@@ -58,6 +89,7 @@ const Logger = {
     return `${parseFloat((bytes / k ** i).toFixed(2))} ${sizes[i]}`;
   },
 
+  /** Prompts the user with a Yes/No question */
   confirm: (query: string): Promise<boolean> => {
     const rl = readline.createInterface({
       input: process.stdin,
@@ -84,6 +116,7 @@ const Logger = {
     });
   },
 
+  /** Prompts the user when a file has already been converted */
   askConflict: (filename: string): Promise<"yes" | "yes_all" | "no" | "no_all"> => {
     const rl = readline.createInterface({
       input: process.stdin,
@@ -117,7 +150,7 @@ const Logger = {
             resolve("no");
           } else {
             console.log("   ❌ Invalid option. Please try again.");
-            ask(); // Recursively ask again
+            ask();
           }
         });
       };
@@ -125,6 +158,7 @@ const Logger = {
     });
   },
 
+  /** Prompts the user when the converted file is larger than the original */
   askLargerFile: (
     filename: string,
     origSize: number,
@@ -177,6 +211,7 @@ const Logger = {
 // ==========================================
 
 const FFmpegService = {
+  /** Verifies that a binary (ffmpeg/ffprobe) exists and is executable */
   checkBinary: (binary: string): Promise<void> => {
     return new Promise((resolve, reject) => {
       const proc = spawn(binary, ["-version"]);
@@ -185,6 +220,7 @@ const FFmpegService = {
     });
   },
 
+  /** Extracts video height using ffprobe */
   getHeight: (filePath: string): Promise<number> => {
     return new Promise((resolve) => {
       const args = [
@@ -210,6 +246,7 @@ const FFmpegService = {
     });
   },
 
+  /** Reads the 'comment' metadata tag to check if we processed this file */
   getEncodingTag: (filePath: string): Promise<string | null> => {
     return new Promise((resolve) => {
       const args = [
@@ -232,6 +269,7 @@ const FFmpegService = {
     });
   },
 
+  /** Executes the FFmpeg conversion process */
   convert: async (
     input: string,
     output: string,
@@ -245,7 +283,7 @@ const FFmpegService = {
         "-i",
         input,
         "-map",
-        "0",
+        "0", // Map all streams
         "-c:v",
         "libx265",
         "-crf",
@@ -253,13 +291,14 @@ const FFmpegService = {
         "-preset",
         opts.preset,
         "-c:a",
-        "copy",
+        "copy", // Passthrough audio
         "-c:s",
-        "copy",
+        "copy", // Passthrough subtitles
         "-metadata",
-        "comment=Encoded using @imlokesh/easy-hevc",
+        "comment=Encoded using @imlokesh/easy-hevc", // Tag for future detection
       ];
 
+      // Smart Resolution Scaling
       if (inputHeight > targetHeight) {
         Logger.info(`Downscaling: ${inputHeight}p -> ${targetHeight}p`);
         args.push("-vf", `scale=-2:${targetHeight}`);
@@ -267,10 +306,11 @@ const FFmpegService = {
         Logger.info(`Keeping resolution: ${inputHeight || "unknown"}p`);
       }
 
-      args.push("-y", output);
+      args.push("-y", output); // Overwrite temp file if exists
 
       const proc = spawn("ffmpeg", args);
 
+      // Parse stderr for progress (ffmpeg sends updates to stderr)
       proc.stderr.on("data", (chunk) => {
         const line = chunk.toString();
         const timeMatch = line.match(/time=(\S+)/);
@@ -306,6 +346,7 @@ const FileService = {
     ".mpeg",
   ]),
 
+  /** Recursively scans a directory for video files */
   scan: async (dir: string): Promise<string[]> => {
     let results: string[] = [];
     try {
@@ -330,6 +371,7 @@ const FileService = {
     return results;
   },
 
+  /** Safely checks if a file exists */
   exists: async (filePath: string): Promise<boolean> => {
     try {
       await fs.access(filePath, constants.F_OK);
@@ -339,8 +381,10 @@ const FileService = {
     }
   },
 
+  /** Gets file size in bytes */
   getSize: async (filePath: string) => (await fs.stat(filePath)).size,
 
+  /** Copies access and modification time from source to dest */
   copyStats: async (source: string, dest: string) => {
     try {
       const stats = await fs.stat(source);
@@ -358,6 +402,7 @@ const FileService = {
 const runConvert = async (opts: ConversionOptions) => {
   Logger.header("Starting Video Compression");
 
+  // Step 1: Dependencies Check
   try {
     await FFmpegService.checkBinary("ffmpeg");
     await FFmpegService.checkBinary("ffprobe");
@@ -366,6 +411,7 @@ const runConvert = async (opts: ConversionOptions) => {
     process.exit(1);
   }
 
+  // Step 2: Scan for Files
   const files = await FileService.scan(opts.input);
   if (files.length === 0) {
     Logger.warn("No video files found.");
@@ -378,6 +424,7 @@ const runConvert = async (opts: ConversionOptions) => {
   let successCount = 0;
   let conflictPolicy: "ask" | "always" | "never" = "ask";
 
+  // Step 3: Iterate through files
   for (let i = 0; i < files.length; i++) {
     const file = files[i];
     const fileInfo = path.parse(file);
@@ -386,12 +433,13 @@ const runConvert = async (opts: ConversionOptions) => {
     Logger.divider();
     Logger.info(`[${i + 1}/${files.length}] Processing: ${fileInfo.base}`);
 
+    // Check if this is likely an output file to avoid infinite loops
     if (baseName.endsWith(opts.suffix)) {
       Logger.skip("Skipping: File appears to be an output file.");
       continue;
     }
 
-    // --- METADATA CHECK START ---
+    // Step 4: Check if already converted (by metadata)
     const tag = await FFmpegService.getEncodingTag(file);
     const isAlreadyConverted = tag === "Encoded using @imlokesh/easy-hevc";
 
@@ -420,8 +468,8 @@ const runConvert = async (opts: ConversionOptions) => {
       }
       // If 'always', proceed.
     }
-    // --- METADATA CHECK END ---
 
+    // Step 5: Prepare Paths
     const outputName = `${baseName}${opts.suffix}.mkv`;
     const tempName = `${baseName}${opts.suffix}.temp.mkv`;
     const outputPath = path.join(fileInfo.dir, outputName);
@@ -432,6 +480,7 @@ const runConvert = async (opts: ConversionOptions) => {
       continue;
     }
 
+    // Step 6: Convert
     try {
       await FFmpegService.convert(file, tempPath, opts, parseInt(opts.resolution, 10));
 
@@ -440,6 +489,7 @@ const runConvert = async (opts: ConversionOptions) => {
         Logger.info("📅 Timestamps preserved.");
       }
 
+      // Step 7: Size Comparison & Finalizing
       const originalSize = await FileService.getSize(file);
       const newSize = await FileService.getSize(tempPath);
       const savedBytes = originalSize - newSize;
@@ -486,9 +536,10 @@ const runFinalize = async (opts: FinalizeOptions) => {
   Logger.info(`Scanning: ${opts.input}`);
   Logger.info(`Looking for files with suffix: "${opts.suffix}"`);
 
+  // Step 1: Scan all files
   const allFiles = await FileService.scan(opts.input);
 
-  // Categorize files
+  // Step 2: Categorize files (Converted vs Others)
   const convertedFiles: string[] = [];
   const unconvertedFiles: string[] = [];
 
@@ -501,7 +552,8 @@ const runFinalize = async (opts: FinalizeOptions) => {
     }
   }
 
-  // Analyze Pairs
+  // Step 3: Match Pairs (Original <-> Converted)
+  // We try to find the original file for every converted file we found.
   const toProcess: Array<{
     original?: string;
     converted: string;
@@ -509,7 +561,6 @@ const runFinalize = async (opts: FinalizeOptions) => {
   }> = [];
   const notConvertedYet: string[] = [];
 
-  // Check processed files
   for (const converted of convertedFiles) {
     const dir = path.dirname(converted);
     const name = path.basename(converted, path.extname(converted)); // name without ext
@@ -521,6 +572,7 @@ const runFinalize = async (opts: FinalizeOptions) => {
     // Find if original exists.
     const original = unconvertedFiles.find((u) => {
       const uParams = path.parse(u);
+      // It matches if it's in the same directory and has the base name
       return uParams.dir === dir && uParams.name === baseParams;
     });
 
@@ -531,7 +583,7 @@ const runFinalize = async (opts: FinalizeOptions) => {
     });
   }
 
-  // Check for completely untouched files
+  // Step 4: Identify Unprocessed Files
   for (const original of unconvertedFiles) {
     const { name } = path.parse(original);
     // Is this file represented in our "toProcess" list?
@@ -543,7 +595,7 @@ const runFinalize = async (opts: FinalizeOptions) => {
     }
   }
 
-  // --- Reporting ---
+  // Step 5: Report Findings
   Logger.divider();
   Logger.info(`Found ${convertedFiles.length} converted files.`);
   Logger.info(`Found ${notConvertedYet.length} unprocessed (original) files.`);
@@ -568,6 +620,7 @@ const runFinalize = async (opts: FinalizeOptions) => {
     Logger.warn("No converted files found to finalize.");
     process.exit(0);
   } else {
+    // Everything looks good, ask for final confirmation
     if (!opts.force) {
       const proceed = await Logger.confirm(
         `Ready to replace ${toProcess.length} original files with converted versions? This cannot be undone.`,
@@ -579,7 +632,7 @@ const runFinalize = async (opts: FinalizeOptions) => {
     }
   }
 
-  // --- Execution ---
+  // Step 6: Execution Loop
   Logger.header("Executing Cleanup");
 
   let deletedCount = 0;
@@ -590,7 +643,7 @@ const runFinalize = async (opts: FinalizeOptions) => {
     try {
       let skipReplacement = false;
 
-      // Check file sizes
+      // Sub-step: Check if converted file is unexpectedly larger
       if (item.original) {
         const oSize = await FileService.getSize(item.original);
         const cSize = await FileService.getSize(item.converted);
@@ -619,6 +672,7 @@ const runFinalize = async (opts: FinalizeOptions) => {
           }
 
           if (action === "yes") {
+            // User chose to delete the larger converted file and keep the original
             await fs.unlink(item.converted);
             Logger.info(
               `🗑️  Deleted Larger Converted File: ${path.basename(item.converted)}`,
@@ -630,15 +684,14 @@ const runFinalize = async (opts: FinalizeOptions) => {
 
       if (skipReplacement) continue;
 
-      // 1. If original exists, delete it
+      // Sub-step: Delete Original
       if (item.original) {
         await fs.unlink(item.original);
         deletedCount++;
         Logger.info(`🗑️  Deleted Original: ${path.basename(item.original)}`);
       }
 
-      // 2. Rename converted to clean name
-      // Check if we are renaming 'video_converted.mkv' -> 'video.mkv'
+      // Sub-step: Rename Converted -> Clean Name
       if (item.converted !== item.cleanName) {
         await fs.rename(item.converted, item.cleanName);
         renamedCount++;
@@ -664,6 +717,7 @@ const runFinalize = async (opts: FinalizeOptions) => {
 // ==========================================
 
 const main = async () => {
+  // Initialize CLI with @imlokesh/clide
   const { command, commandOptions } = await clide({
     description: "Modern Video Compressor (HEVC)",
     defaultCommand: "convert",
