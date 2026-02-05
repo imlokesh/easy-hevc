@@ -124,6 +124,52 @@ const Logger = {
       ask();
     });
   },
+
+  askLargerFile: (
+    filename: string,
+    origSize: number,
+    convSize: number,
+  ): Promise<"yes" | "yes_all" | "no" | "no_all"> => {
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+
+    return new Promise((resolve) => {
+      console.log(`\n⚠️  Converted file "${filename}" is larger than original!`);
+      console.log(`   Original:  ${Logger.formatBytes(origSize)}`);
+      console.log(`   Converted: ${Logger.formatBytes(convSize)}`);
+      console.log("\n   Do you want to delete the converted file instead?");
+      console.log("   [y] Yes (delete converted, keep original)");
+      console.log("   [n] No (delete original, keep converted)");
+      console.log("   [A] Yes to All");
+      console.log("   [N] No to All");
+
+      const ask = () => {
+        rl.question(`   Select option: `, (ans) => {
+          const a = ans.trim();
+
+          if (a === "A") {
+            rl.close();
+            resolve("yes_all");
+          } else if (a === "N") {
+            rl.close();
+            resolve("no_all");
+          } else if (a.toLowerCase() === "y" || a.toLowerCase() === "yes") {
+            rl.close();
+            resolve("yes");
+          } else if (a.toLowerCase() === "n" || a.toLowerCase() === "no") {
+            rl.close();
+            resolve("no");
+          } else {
+            console.log("   ❌ Invalid option. Please try again.");
+            ask();
+          }
+        });
+      };
+      ask();
+    });
+  },
 };
 
 // ==========================================
@@ -538,9 +584,52 @@ const runFinalize = async (opts: FinalizeOptions) => {
 
   let deletedCount = 0;
   let renamedCount = 0;
+  let largerFilePolicy: "ask" | "delete_converted" | "keep_converted" = "ask";
 
   for (const item of toProcess) {
     try {
+      let skipReplacement = false;
+
+      // Check file sizes
+      if (item.original) {
+        const oSize = await FileService.getSize(item.original);
+        const cSize = await FileService.getSize(item.converted);
+
+        if (cSize > oSize) {
+          let action = "ask";
+
+          if (largerFilePolicy === "delete_converted") action = "yes";
+          else if (largerFilePolicy === "keep_converted") action = "no";
+
+          if (action === "ask") {
+            const answer = await Logger.askLargerFile(
+              path.basename(item.converted),
+              oSize,
+              cSize,
+            );
+            if (answer === "yes_all") {
+              largerFilePolicy = "delete_converted";
+              action = "yes";
+            } else if (answer === "no_all") {
+              largerFilePolicy = "keep_converted";
+              action = "no";
+            } else {
+              action = answer;
+            }
+          }
+
+          if (action === "yes") {
+            await fs.unlink(item.converted);
+            Logger.info(
+              `🗑️  Deleted Larger Converted File: ${path.basename(item.converted)}`,
+            );
+            skipReplacement = true;
+          }
+        }
+      }
+
+      if (skipReplacement) continue;
+
       // 1. If original exists, delete it
       if (item.original) {
         await fs.unlink(item.original);
