@@ -165,7 +165,7 @@ const Logger = {
     filename: string,
     origSize: number,
     convSize: number,
-  ): Promise<"yes" | "yes_all" | "no" | "no_all"> => {
+  ): Promise<"yes" | "yes_all" | "no" | "no_all" | "skip" | "skip_all"> => {
     const rl = readline.createInterface({
       input: process.stdin,
       output: process.stdout,
@@ -178,8 +178,10 @@ const Logger = {
       console.log("\n   Do you want to delete the converted file instead?");
       console.log("   [y] Yes (delete converted, keep original)");
       console.log("   [n] No (delete original, keep converted)");
+      console.log("   [s] Skip (keep both, do nothing)");
       console.log("   [A] Yes to All");
       console.log("   [N] No to All");
+      console.log("   [S] Skip to All"); // <--- ADDED
 
       const ask = () => {
         rl.question(`   Select option: `, (ans) => {
@@ -191,12 +193,19 @@ const Logger = {
           } else if (a === "N") {
             rl.close();
             resolve("no_all");
+          } else if (a === "S") {
+            // <--- ADDED
+            rl.close();
+            resolve("skip_all");
           } else if (a.toLowerCase() === "y" || a.toLowerCase() === "yes") {
             rl.close();
             resolve("yes");
           } else if (a.toLowerCase() === "n" || a.toLowerCase() === "no") {
             rl.close();
             resolve("no");
+          } else if (a.toLowerCase() === "s" || a.toLowerCase() === "skip") {
+            rl.close();
+            resolve("skip");
           } else {
             console.log("   ❌ Invalid option. Please try again.");
             ask();
@@ -632,7 +641,7 @@ const runFinalize = async (opts: FinalizeOptions) => {
 
   let deletedCount = 0;
   let renamedCount = 0;
-  let largerFilePolicy: "ask" | "delete_converted" | "keep_converted" = "ask";
+  let largerFilePolicy: "ask" | "delete_converted" | "keep_converted" | "skip_all" = "ask";
 
   for (const item of toProcess) {
     try {
@@ -655,6 +664,7 @@ const runFinalize = async (opts: FinalizeOptions) => {
 
             if (largerFilePolicy === "delete_converted") action = "yes";
             else if (largerFilePolicy === "keep_converted") action = "no";
+            else if (largerFilePolicy === "skip_all") action = "skip";
 
             if (action === "ask") {
               const answer = await Logger.askLargerFile(
@@ -668,6 +678,9 @@ const runFinalize = async (opts: FinalizeOptions) => {
               } else if (answer === "no_all") {
                 largerFilePolicy = "keep_converted";
                 action = "no";
+              } else if (answer === "skip_all") {
+                largerFilePolicy = "skip_all";
+                action = "skip";
               } else {
                 action = answer;
               }
@@ -676,6 +689,9 @@ const runFinalize = async (opts: FinalizeOptions) => {
             if (action === "yes") {
               await fs.unlink(item.converted);
               Logger.info(`🗑️  Deleted Larger Converted File: ${path.basename(item.converted)}`);
+              skipReplacement = true;
+            } else if (action === "skip") {
+              Logger.skip(`Skipping cleanup for: ${path.basename(item.original)}`);
               skipReplacement = true;
             }
           }
