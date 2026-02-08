@@ -54,6 +54,8 @@ interface FinalizeOptions {
   suffix: string;
   /** If true, skips confirmation prompts */
   force: boolean;
+  /** If true, simulates actions without modifying the disk */
+  dryRun: boolean;
 }
 
 // ==========================================
@@ -67,7 +69,7 @@ const Logger = {
   error: (msg: string) => console.error(`  ❌ ${msg}`),
   skip: (msg: string) => console.log(`  ⏭️  ${msg}`),
   progress: (msg: string) => process.stdout.write(`  ⏳ ${msg}\r`),
-  
+
   clearLine: () => {
     if (process.stdout.isTTY) {
       process.stdout.clearLine(0);
@@ -532,7 +534,7 @@ const runConvert = async (opts: ConversionOptions) => {
 // ==========================================
 
 const runFinalize = async (opts: FinalizeOptions) => {
-  Logger.header("Finalize / Cleanup Mode");
+  Logger.header(opts.dryRun ? "Finalize (DRY RUN MODE)" : "Finalize / Cleanup Mode");
   Logger.info(`Scanning: ${opts.input}`);
   Logger.info(`Looking for files with suffix: "${opts.suffix}"`);
 
@@ -553,7 +555,6 @@ const runFinalize = async (opts: FinalizeOptions) => {
   }
 
   // Step 3: Match Pairs (Original <-> Converted)
-  // We try to find the original file for every converted file we found.
   const toProcess: Array<{
     original?: string;
     converted: string;
@@ -563,16 +564,12 @@ const runFinalize = async (opts: FinalizeOptions) => {
 
   for (const converted of convertedFiles) {
     const dir = path.dirname(converted);
-    const name = path.basename(converted, path.extname(converted)); // name without ext
-    const baseParams = name.substring(0, name.length - opts.suffix.length); // remove suffix
-
-    // We want the final file to be baseParams.mkv (since we converted to mkv)
+    const name = path.basename(converted, path.extname(converted));
+    const baseParams = name.substring(0, name.length - opts.suffix.length);
     const finalCleanPath = path.join(dir, `${baseParams}.mkv`);
 
-    // Find if original exists.
     const original = unconvertedFiles.find((u) => {
       const uParams = path.parse(u);
-      // It matches if it's in the same directory and has the base name
       return uParams.dir === dir && uParams.name === baseParams;
     });
 
@@ -586,10 +583,7 @@ const runFinalize = async (opts: FinalizeOptions) => {
   // Step 4: Identify Unprocessed Files
   for (const original of unconvertedFiles) {
     const { name } = path.parse(original);
-    // Is this file represented in our "toProcess" list?
     const isAccountedFor = toProcess.some((p) => p.original === original);
-
-    // Also check if it looks like a temp file
     if (!isAccountedFor && !name.includes(".temp")) {
       notConvertedYet.push(original);
     }
@@ -607,7 +601,8 @@ const runFinalize = async (opts: FinalizeOptions) => {
     });
     if (notConvertedYet.length > 5) console.log(`   ... and ${notConvertedYet.length - 5} more.`);
 
-    if (!opts.force) {
+    // Skip confirmation in Dry Run
+    if (!opts.force && !opts.dryRun) {
       const proceed = await Logger.confirm(
         "Do you want to continue cleaning up the converted files anyway?",
       );
@@ -620,8 +615,8 @@ const runFinalize = async (opts: FinalizeOptions) => {
     Logger.warn("No converted files found to finalize.");
     process.exit(0);
   } else {
-    // Everything looks good, ask for final confirmation
-    if (!opts.force) {
+    // Skip confirmation in Dry Run
+    if (!opts.force && !opts.dryRun) {
       const proceed = await Logger.confirm(
         `Ready to replace ${toProcess.length} original files with converted versions? This cannot be undone.`,
       );
@@ -633,7 +628,7 @@ const runFinalize = async (opts: FinalizeOptions) => {
   }
 
   // Step 6: Execution Loop
-  Logger.header("Executing Cleanup");
+  Logger.header(opts.dryRun ? "Simulating Cleanup..." : "Executing Cleanup");
 
   let deletedCount = 0;
   let renamedCount = 0;
@@ -649,35 +644,40 @@ const runFinalize = async (opts: FinalizeOptions) => {
         const cSize = await FileService.getSize(item.converted);
 
         if (cSize > oSize) {
-          let action = "ask";
-
-          if (largerFilePolicy === "delete_converted") action = "yes";
-          else if (largerFilePolicy === "keep_converted") action = "no";
-
-          if (action === "ask") {
-            const answer = await Logger.askLargerFile(
-              path.basename(item.converted),
-              oSize,
-              cSize,
+          if (opts.dryRun) {
+            Logger.warn(
+              `[DRY RUN] ⚠️  ${path.basename(item.converted)} is larger than original. User would be prompted.`,
             );
-            if (answer === "yes_all") {
-              largerFilePolicy = "delete_converted";
-              action = "yes";
-            } else if (answer === "no_all") {
-              largerFilePolicy = "keep_converted";
-              action = "no";
-            } else {
-              action = answer;
-            }
-          }
-
-          if (action === "yes") {
-            // User chose to delete the larger converted file and keep the original
-            await fs.unlink(item.converted);
-            Logger.info(
-              `🗑️  Deleted Larger Converted File: ${path.basename(item.converted)}`,
-            );
+            // In dry run, we assume we don't proceed with this specific file to be safe
             skipReplacement = true;
+          } else {
+            let action = "ask";
+
+            if (largerFilePolicy === "delete_converted") action = "yes";
+            else if (largerFilePolicy === "keep_converted") action = "no";
+
+            if (action === "ask") {
+              const answer = await Logger.askLargerFile(
+                path.basename(item.converted),
+                oSize,
+                cSize,
+              );
+              if (answer === "yes_all") {
+                largerFilePolicy = "delete_converted";
+                action = "yes";
+              } else if (answer === "no_all") {
+                largerFilePolicy = "keep_converted";
+                action = "no";
+              } else {
+                action = answer;
+              }
+            }
+
+            if (action === "yes") {
+              await fs.unlink(item.converted);
+              Logger.info(`🗑️  Deleted Larger Converted File: ${path.basename(item.converted)}`);
+              skipReplacement = true;
+            }
           }
         }
       }
@@ -686,18 +686,30 @@ const runFinalize = async (opts: FinalizeOptions) => {
 
       // Sub-step: Delete Original
       if (item.original) {
-        await fs.unlink(item.original);
-        deletedCount++;
-        Logger.info(`🗑️  Deleted Original: ${path.basename(item.original)}`);
+        if (opts.dryRun) {
+          Logger.info(`[DRY RUN] Would delete original: ${path.basename(item.original)}`);
+          deletedCount++;
+        } else {
+          await fs.unlink(item.original);
+          deletedCount++;
+          Logger.info(`🗑️  Deleted Original: ${path.basename(item.original)}`);
+        }
       }
 
       // Sub-step: Rename Converted -> Clean Name
       if (item.converted !== item.cleanName) {
-        await fs.rename(item.converted, item.cleanName);
-        renamedCount++;
-        Logger.success(
-          `RENAME: ${path.basename(item.converted)} -> ${path.basename(item.cleanName)}`,
-        );
+        if (opts.dryRun) {
+          Logger.success(
+            `[DRY RUN] Would rename: ${path.basename(item.converted)} -> ${path.basename(item.cleanName)}`,
+          );
+          renamedCount++;
+        } else {
+          await fs.rename(item.converted, item.cleanName);
+          renamedCount++;
+          Logger.success(
+            `RENAME: ${path.basename(item.converted)} -> ${path.basename(item.cleanName)}`,
+          );
+        }
       }
     } catch (e: unknown) {
       if (e instanceof Error) {
@@ -707,7 +719,7 @@ const runFinalize = async (opts: FinalizeOptions) => {
   }
 
   Logger.divider();
-  Logger.success(`Cleanup Complete.`);
+  Logger.success(opts.dryRun ? "Dry Run Complete." : "Cleanup Complete.");
   Logger.info(`Originals Deleted: ${deletedCount}`);
   Logger.info(`Files Renamed: ${renamedCount}`);
 };
@@ -792,6 +804,12 @@ const main = async () => {
             default: false,
             description: "Skip confirmation prompts",
           },
+          "dry-run": {
+            type: "boolean",
+            short: "d",
+            default: false,
+            description: "Simulate actions without deleting files",
+          },
         },
       },
     },
@@ -812,6 +830,7 @@ const main = async () => {
       input: commandOptions.input as string,
       suffix: commandOptions.suffix as string,
       force: commandOptions.force as boolean,
+      dryRun: commandOptions["dry-run"] as boolean,
     });
   }
 };
