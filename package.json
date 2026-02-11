@@ -1,17 +1,39 @@
 {
   "name": "easy-hevc",
-  "module": "index.ts",
+  "version": "1.0.0",
+  "description": "Easiest way to convert video files to hevc (H.265) using ffmpeg. ",
+  "license": "MIT",
+  "author": "imlokesh",
   "type": "module",
+  "bin": {
+    "easy-hevc": "./dist/index.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "dev": "bun run index.ts",
+    "test": "bun test",
+    "build": "bun build index.ts --outfile=dist/index.js --target=node --format=esm",
+    "prepublishOnly": "npm run build"
+  },
+  "dependencies": {
+    "@imlokesh/clide": "latest"
+  },
   "devDependencies": {
     "@biomejs/biome": "2.3.10",
     "@types/bun": "latest",
-    "@types/node": "^24.10.9",
+    "@types/node": "^24.10.13",
     "typescript": "^5.9.3"
   },
   "peerDependencies": {
     "typescript": "^5.9.2"
   },
-  "dependencies": {
-    "@imlokesh/clide": "latest"
+  "publishConfig": {
+    "access": "public"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/imlokesh/easy-hevc.git"
   }
 }

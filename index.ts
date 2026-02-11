@@ -1,3 +1,5 @@
+#!/usr/bin/env node
+
 /**
  * Easy HEVC - Modern Video Compressor
  *
@@ -747,7 +749,7 @@ const runFinalize = async (opts: FinalizeOptions) => {
 const main = async () => {
   // Initialize CLI with @imlokesh/clide
   const { command, commandOptions } = await clide({
-    description: "Modern Video Compressor (HEVC)",
+    description: "easy-hevc - A CLI tool to batch convert video files to HEVC (H.265) format.",
     defaultCommand: "convert",
     commands: {
       convert: {
