@@ -1,6 +1,6 @@
 {
   "name": "easy-hevc",
-  "version": "1.0.0",
+  "version": "1.0.1",
   "description": "Easiest way to convert video files to hevc (H.265) using ffmpeg. ",
   "license": "MIT",
   "author": "imlokesh",
