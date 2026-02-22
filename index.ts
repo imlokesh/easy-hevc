@@ -299,15 +299,23 @@ const FFmpegService = {
         "-c:s",
         "copy", // Passthrough subtitles
         "-metadata",
-        `easy_hevc_original_file=${originalFilename}`, // Tag to store original filename
+        `easy_hevc_original_file=${originalFilename}`,
+        "-metadata",
+        `easy_hevc_original_resolution=${inputHeight}p`,
+        "-metadata",
+        `easy_hevc_crf=${opts.crf}`,
+        "-metadata",
+        `easy_hevc_preset=${opts.preset}`,
       ];
 
       // Evaluate resolution scaling
       if (inputHeight > targetHeight) {
         Logger.info(`Downscaling: ${inputHeight}p -> ${targetHeight}p`);
         args.push("-vf", `scale=-2:${targetHeight}`);
+        args.push("-metadata", `easy_hevc_target_resolution=${targetHeight}p`);
       } else {
         Logger.info(`Keeping resolution: ${inputHeight || "unknown"}p`);
+        args.push("-metadata", `easy_hevc_target_resolution=${inputHeight}p (original)`);
       }
 
       args.push("-y", output); // Overwrite target if exists
