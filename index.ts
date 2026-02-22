@@ -48,8 +48,6 @@ interface ConversionOptions {
 interface FinalizeOptions {
   /** Input directory to scan for converted/original pairs */
   input: string;
-  /** Suffix used to identify converted files */
-  suffix: string;
   /** If true, skips confirmation prompts */
   force: boolean;
   /** If true, simulates actions without modifying the disk */
@@ -177,7 +175,7 @@ const Logger = {
       console.log("   [s] Skip (keep both, do nothing)");
       console.log("   [A] Yes to All");
       console.log("   [N] No to All");
-      console.log("   [S] Skip to All"); // <--- ADDED
+      console.log("   [S] Skip to All");
 
       const ask = () => {
         rl.question(`   Select option: `, (ans) => {
@@ -190,7 +188,6 @@ const Logger = {
             rl.close();
             resolve("no_all");
           } else if (a === "S") {
-            // <--- ADDED
             rl.close();
             resolve("skip_all");
           } else if (a.toLowerCase() === "y" || a.toLowerCase() === "yes") {
@@ -251,14 +248,14 @@ const FFmpegService = {
     });
   },
 
-  /** Reads the metadata 'comment' tag to detect prior encoding */
-  getEncodingTag: (filePath: string): Promise<string | null> => {
+  /** Reads the metadata 'easy_hevc_original_file' tag to detect prior encoding and fetch original filename */
+  getOriginalFilenameTag: (filePath: string): Promise<string | null> => {
     return new Promise((resolve) => {
       const args = [
         "-v",
         "error",
         "-show_entries",
-        "format_tags=comment",
+        "format_tags=easy_hevc_original_file",
         "-of",
         "default=noprint_wrappers=1:nokey=1",
         filePath,
@@ -269,7 +266,8 @@ const FFmpegService = {
         data += chunk;
       });
       proc.on("close", () => {
-        resolve(data.trim());
+        const result = data.trim();
+        resolve(result ? result : null);
       });
     });
   },
@@ -282,6 +280,7 @@ const FFmpegService = {
     targetHeight: number,
   ): Promise<void> => {
     const inputHeight = await FFmpegService.getHeight(input);
+    const originalFilename = path.basename(input);
 
     return new Promise((resolve, reject) => {
       const args = [
@@ -300,7 +299,7 @@ const FFmpegService = {
         "-c:s",
         "copy", // Passthrough subtitles
         "-metadata",
-        "comment=Encoded using @imlokesh/easy-hevc", // Tag to track converted files
+        `easy_hevc_original_file=${originalFilename}`, // Tag to store original filename
       ];
 
       // Evaluate resolution scaling
@@ -441,9 +440,9 @@ const runConvert = async (opts: ConversionOptions) => {
       continue;
     }
 
-    // Skip previously encoded files
-    const tag = await FFmpegService.getEncodingTag(file);
-    const isAlreadyConverted = tag === "Encoded using @imlokesh/easy-hevc";
+    // Skip previously encoded files by checking for our custom tag
+    const originalFileTag = await FFmpegService.getOriginalFilenameTag(file);
+    const isAlreadyConverted = !!originalFileTag;
 
     if (isAlreadyConverted) {
       if (conflictPolicy === "never") {
@@ -534,98 +533,64 @@ const runConvert = async (opts: ConversionOptions) => {
 const runFinalize = async (opts: FinalizeOptions) => {
   Logger.header(opts.dryRun ? "Finalize (DRY RUN MODE)" : "Finalize / Cleanup Mode");
   Logger.info(`Scanning: ${opts.input}`);
-  Logger.info(`Looking for files with suffix: "${opts.suffix}"`);
 
-  // Locate all target files
+  // Locate all video files and filter specifically for MKVs
   const allFiles = await FileService.scan(opts.input);
+  const mkvFiles = allFiles.filter((f) => f.toLowerCase().endsWith(".mkv"));
 
-  // Categorize files by suffix
-  const convertedFiles: string[] = [];
-  const unconvertedFiles: string[] = [];
-
-  for (const file of allFiles) {
-    const { name } = path.parse(file);
-    if (name.endsWith(opts.suffix)) {
-      convertedFiles.push(file);
-    } else {
-      unconvertedFiles.push(file);
-    }
-  }
-
-  // Map original files to their converted versions
   const toProcess: Array<{
-    original?: string;
-    converted: string;
-    cleanName: string;
+    mkvPath: string;
+    originalPath: string;
+    finalPath: string;
+    originalExists: boolean;
+    needsRename: boolean;
   }> = [];
-  const notConvertedYet: string[] = [];
 
-  for (const converted of convertedFiles) {
-    const dir = path.dirname(converted);
-    const name = path.basename(converted, path.extname(converted));
-    const baseParams = name.substring(0, name.length - opts.suffix.length);
-    const finalCleanPath = path.join(dir, `${baseParams}.mkv`);
+  // Inspect each MKV for the converted metadata tag
+  for (const mkv of mkvFiles) {
+    const originalFilename = await FFmpegService.getOriginalFilenameTag(mkv);
 
-    const original = unconvertedFiles.find((u) => {
-      const uParams = path.parse(u);
-      return uParams.dir === dir && uParams.name === baseParams;
-    });
+    // Skip if it doesn't have the tag (not a converted file)
+    if (!originalFilename) continue;
 
-    toProcess.push({
-      original: original,
-      converted: converted,
-      cleanName: finalCleanPath,
-    });
-  }
+    const dir = path.dirname(mkv);
+    const originalPath = path.join(dir, originalFilename);
+    const parsedOrig = path.parse(originalFilename);
+    const finalPath = path.join(dir, `${parsedOrig.name}.mkv`);
 
-  // Track skipped or pending files
-  for (const original of unconvertedFiles) {
-    const { name } = path.parse(original);
-    const isAccountedFor = toProcess.some((p) => p.original === original);
-    if (!isAccountedFor && !name.includes(".temp")) {
-      notConvertedYet.push(original);
+    // Check if the original file still exists.
+    // (We also ensure we don't accidentally flag the current MKV as its own original)
+    const originalExists = (await FileService.exists(originalPath)) && originalPath !== mkv;
+
+    // Check if the current name already matches the expected final name
+    const needsRename = mkv !== finalPath;
+
+    // Only queue it if there is work to do
+    if (originalExists || needsRename) {
+      toProcess.push({ mkvPath: mkv, originalPath, finalPath, originalExists, needsRename });
     }
   }
 
-  // Display current status summary
-  Logger.divider();
-  Logger.info(`Found ${convertedFiles.length} converted files.`);
-  Logger.info(`Found ${notConvertedYet.length} unprocessed (original) files.`);
-
-  if (notConvertedYet.length > 0) {
-    Logger.warn("WARNING: The following files have NOT been converted yet:");
-    notConvertedYet.slice(0, 5).forEach((f) => {
-      console.log(`   - ${path.basename(f)}`);
-    });
-    if (notConvertedYet.length > 5) console.log(`   ... and ${notConvertedYet.length - 5} more.`);
-
-    // Skip confirmation in Dry Run
-    if (!opts.force && !opts.dryRun) {
-      const proceed = await Logger.confirm(
-        "Do you want to continue cleaning up the converted files anyway?",
-      );
-      if (!proceed) {
-        console.log("Exiting.");
-        process.exit(0);
-      }
-    }
-  } else if (convertedFiles.length === 0) {
-    Logger.warn("No converted files found to finalize.");
+  if (toProcess.length === 0) {
+    Logger.warn("No converted files found requiring finalization.");
     process.exit(0);
-  } else {
-    // Skip confirmation in Dry Run
-    if (!opts.force && !opts.dryRun) {
-      const proceed = await Logger.confirm(
-        `Ready to replace ${toProcess.length} original files with converted versions? This cannot be undone.`,
-      );
-      if (!proceed) {
-        console.log("Exiting.");
-        process.exit(0);
-      }
+  }
+
+  Logger.divider();
+  Logger.info(`Found ${toProcess.length} converted files to process.`);
+
+  // Confirmation prompt (unless skipped by --force or --dry-run)
+  if (!opts.force && !opts.dryRun) {
+    const proceed = await Logger.confirm(
+      `Ready to finalize ${toProcess.length} files? This will delete originals and rename the converted MKVs.`,
+    );
+    if (!proceed) {
+      console.log("Exiting.");
+      process.exit(0);
     }
   }
 
-  // Apply finalization tasks
+  // Execute the cleanup tasks
   Logger.header(opts.dryRun ? "Simulating Cleanup..." : "Executing Cleanup");
 
   let deletedCount = 0;
@@ -636,17 +601,16 @@ const runFinalize = async (opts: FinalizeOptions) => {
     try {
       let skipReplacement = false;
 
-      // Enforce space-saving checks before replacement
-      if (item.original) {
-        const oSize = await FileService.getSize(item.original);
-        const cSize = await FileService.getSize(item.converted);
+      // Check space savings if the original still exists
+      if (item.originalExists) {
+        const oSize = await FileService.getSize(item.originalPath);
+        const cSize = await FileService.getSize(item.mkvPath);
 
         if (cSize > oSize) {
           if (opts.dryRun) {
             Logger.warn(
-              `[DRY RUN] ⚠️  ${path.basename(item.converted)} is larger than original. User would be prompted.`,
+              `[DRY RUN] ⚠️  ${path.basename(item.mkvPath)} is larger than original. User would be prompted.`,
             );
-            // In dry run, we assume we don't proceed with this specific file to be safe
             skipReplacement = true;
           } else {
             let action = "ask";
@@ -656,11 +620,7 @@ const runFinalize = async (opts: FinalizeOptions) => {
             else if (largerFilePolicy === "skip_all") action = "skip";
 
             if (action === "ask") {
-              const answer = await Logger.askLargerFile(
-                path.basename(item.converted),
-                oSize,
-                cSize,
-              );
+              const answer = await Logger.askLargerFile(path.basename(item.mkvPath), oSize, cSize);
               if (answer === "yes_all") {
                 largerFilePolicy = "delete_converted";
                 action = "yes";
@@ -676,49 +636,51 @@ const runFinalize = async (opts: FinalizeOptions) => {
             }
 
             if (action === "yes") {
-              await fs.unlink(item.converted);
-              Logger.info(`🗑️  Deleted Larger Converted File: ${path.basename(item.converted)}`);
+              // Delete converted, keep original
+              await fs.unlink(item.mkvPath);
+              Logger.info(`🗑️  Deleted Larger Converted File: ${path.basename(item.mkvPath)}`);
               skipReplacement = true;
             } else if (action === "skip") {
-              Logger.skip(`Skipping cleanup for: ${path.basename(item.original)}`);
+              Logger.skip(`Skipping cleanup for: ${path.basename(item.originalPath)}`);
               skipReplacement = true;
             }
+            // If "no" (delete original, keep converted), we just continue normally
           }
         }
       }
 
       if (skipReplacement) continue;
 
-      // Remove the original file
-      if (item.original) {
+      // Step 1: Delete original file if it exists
+      if (item.originalExists) {
         if (opts.dryRun) {
-          Logger.info(`[DRY RUN] Would delete original: ${path.basename(item.original)}`);
+          Logger.info(`[DRY RUN] Would delete original: ${path.basename(item.originalPath)}`);
           deletedCount++;
         } else {
-          await fs.unlink(item.original);
+          await fs.unlink(item.originalPath);
+          Logger.info(`🗑️  Deleted Original: ${path.basename(item.originalPath)}`);
           deletedCount++;
-          Logger.info(`🗑️  Deleted Original: ${path.basename(item.original)}`);
         }
       }
 
-      // Remove conversion suffix
-      if (item.converted !== item.cleanName) {
+      // Step 2: Rename converted file to the original base name
+      if (item.needsRename) {
         if (opts.dryRun) {
           Logger.success(
-            `[DRY RUN] Would rename: ${path.basename(item.converted)} -> ${path.basename(item.cleanName)}`,
+            `[DRY RUN] Would rename: ${path.basename(item.mkvPath)} -> ${path.basename(item.finalPath)}`,
           );
           renamedCount++;
         } else {
-          await fs.rename(item.converted, item.cleanName);
-          renamedCount++;
+          await fs.rename(item.mkvPath, item.finalPath);
           Logger.success(
-            `RENAME: ${path.basename(item.converted)} -> ${path.basename(item.cleanName)}`,
+            `RENAME: ${path.basename(item.mkvPath)} -> ${path.basename(item.finalPath)}`,
           );
+          renamedCount++;
         }
       }
     } catch (e: unknown) {
       if (e instanceof Error) {
-        Logger.error(`Failed on ${path.basename(item.converted)}: ${e.message}`);
+        Logger.error(`Failed on ${path.basename(item.mkvPath)}: ${e.message}`);
       }
     }
   }
@@ -794,13 +756,6 @@ const main = async () => {
             required: true,
             description: "Input folder to clean",
           },
-          suffix: {
-            type: "string",
-            short: "s",
-            default: "_converted",
-            env: "HEVC_SUFFIX",
-            description: "Suffix to look for",
-          },
           force: {
             type: "boolean",
             short: "f",
@@ -831,7 +786,6 @@ const main = async () => {
   } else if (command === "finalize") {
     await runFinalize({
       input: commandOptions.input as string,
-      suffix: commandOptions.suffix as string,
       force: commandOptions.force as boolean,
       dryRun: commandOptions["dry-run"] as boolean,
     });
