@@ -85,6 +85,18 @@ const Logger = {
     return `${parseFloat((bytes / k ** i).toFixed(2))} ${sizes[i]}`;
   },
 
+  /** Formats milliseconds into a human-readable duration */
+  formatDuration: (ms: number): string => {
+    const seconds = Math.floor((ms / 1000) % 60);
+    const minutes = Math.floor((ms / (1000 * 60)) % 60);
+    const hours = Math.floor((ms / (1000 * 60 * 60)) % 24);
+    const parts = [];
+    if (hours > 0) parts.push(`${hours}h`);
+    if (minutes > 0) parts.push(`${minutes}m`);
+    if (seconds > 0 || parts.length === 0) parts.push(`${seconds}s`);
+    return parts.join(" ");
+  },
+
   /** CLI Yes/No prompt */
   confirm: (query: string): Promise<boolean> => {
     const rl = readline.createInterface({
@@ -296,15 +308,16 @@ const FFmpegService = {
     });
   },
 
-  /** Executes FFmpeg to encode and optionally downscale the video */
+  /** Executes FFmpeg to encode and optionally downscale the video. Returns elapsed time in ms. */
   convert: async (
     input: string,
     output: string,
     opts: ConversionOptions,
     targetHeight: number,
-  ): Promise<void> => {
+  ): Promise<number> => {
     const inputHeight = await FFmpegService.getHeight(input);
     const originalFilename = path.basename(input);
+    const startTime = Date.now();
 
     return new Promise((resolve, reject) => {
       const args = [
@@ -346,16 +359,26 @@ const FFmpegService = {
 
       const proc = spawn("ffmpeg", args);
 
-      // Parse stderr for progress (ffmpeg sends updates to stderr)
+      // Parse stderr for progress and speed (ffmpeg sends updates to stderr)
       proc.stderr.on("data", (chunk) => {
         const line = chunk.toString();
-        const timeMatch = line.match(/time=(\S+)/);
-        if (timeMatch) Logger.progress(`Encoding... ${timeMatch[1]}`);
+
+        const timeMatch = line.match(/time=([0-9:.]+)/);
+        const speedMatch = line.match(/speed=\s*([\d.]+x)/);
+
+        let progressStr = "Encoding...";
+        if (timeMatch) progressStr += ` ${timeMatch[1]}`;
+        if (speedMatch) progressStr += ` (Speed: ${speedMatch[1]})`;
+
+        if (timeMatch || speedMatch) {
+          Logger.progress(progressStr);
+        }
       });
 
       proc.on("close", (code) => {
         Logger.clearLine();
-        if (code === 0) resolve();
+        const endTime = Date.now();
+        if (code === 0) resolve(endTime - startTime);
         else reject(new Error(`FFmpeg exited with code ${code}`));
       });
 
@@ -522,7 +545,12 @@ const runConvert = async (opts: ConversionOptions) => {
 
     // Execute encoding process
     try {
-      await FFmpegService.convert(file, tempPath, opts, parseInt(opts.resolution, 10));
+      const elapsedMs = await FFmpegService.convert(
+        file,
+        tempPath,
+        opts,
+        parseInt(opts.resolution, 10),
+      );
 
       // Post-conversion validation: Compare durations to ensure completeness
       const convertedDuration = await FFmpegService.getDuration(tempPath);
@@ -545,10 +573,11 @@ const runConvert = async (opts: ConversionOptions) => {
       const newSize = await FileService.getSize(tempPath);
       const savedBytes = originalSize - newSize;
       const savedPercent = ((savedBytes / originalSize) * 100).toFixed(1);
+      const formattedTime = Logger.formatDuration(elapsedMs);
 
       if (savedBytes > 0) {
         Logger.success(
-          `Done! ${Logger.formatBytes(originalSize)} -> ${Logger.formatBytes(newSize)}`,
+          `Done in ${formattedTime}! ${Logger.formatBytes(originalSize)} -> ${Logger.formatBytes(newSize)}`,
         );
         Logger.success(`Saved: ${Logger.formatBytes(savedBytes)} (${savedPercent}%)`);
 
@@ -561,7 +590,9 @@ const runConvert = async (opts: ConversionOptions) => {
         totalSaved += savedBytes;
         successCount++;
       } else {
-        Logger.warn(`File grew by ${Logger.formatBytes(Math.abs(savedBytes))}. keeping original.`);
+        Logger.warn(
+          `File grew by ${Logger.formatBytes(Math.abs(savedBytes))} (Took ${formattedTime}). Keeping original.`,
+        );
         await fs.rename(tempPath, outputPath);
       }
     } catch (err: unknown) {
