@@ -495,7 +495,6 @@ const runConvert = async (opts: ConversionOptions) => {
 
       if (opts.preserveDates) {
         await FileService.copyStats(file, tempPath);
-        Logger.info("📅 Timestamps preserved.");
       }
 
       // Evaluate space savings and replace if optimal
