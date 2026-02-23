@@ -62,7 +62,7 @@ const Logger = {
   warn: (msg: string) => console.log(`  ⚠️  ${msg}`),
   error: (msg: string) => console.error(`  ❌ ${msg}`),
   skip: (msg: string) => console.log(`  ⏭️  ${msg}`),
-  progress: (msg: string) => process.stdout.write(`  ⏳ ${msg}\r`),
+  progress: (msg: string) => process.stdout.write(`  ⏳ ${msg.padEnd(20, " ")}\r`),
 
   clearLine: () => {
     if (process.stdout.isTTY) {
