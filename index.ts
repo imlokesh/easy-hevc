@@ -222,6 +222,30 @@ const FFmpegService = {
     });
   },
 
+  /** Extracts video duration in seconds using ffprobe */
+  getDuration: (filePath: string): Promise<number> => {
+    return new Promise((resolve) => {
+      const args = [
+        "-v",
+        "error",
+        "-show_entries",
+        "format=duration",
+        "-of",
+        "default=noprint_wrappers=1:nokey=1",
+        filePath,
+      ];
+      const proc = spawn("ffprobe", args);
+      let data = "";
+      proc.stdout.on("data", (chunk) => {
+        data += chunk.toString();
+      });
+      proc.on("close", () => {
+        const duration = parseFloat(data.trim());
+        resolve(Number.isNaN(duration) ? 0 : duration);
+      });
+    });
+  },
+
   /** Extracts video resolution height using ffprobe */
   getHeight: (filePath: string): Promise<number> => {
     return new Promise((resolve) => {
@@ -442,6 +466,13 @@ const runConvert = async (opts: ConversionOptions) => {
     Logger.divider();
     Logger.info(`[${i + 1}/${files.length}] Processing: ${fileInfo.base}`);
 
+    // Pre-validation: Check duration to ensure it's a valid video file
+    const originalDuration = await FFmpegService.getDuration(file);
+    if (originalDuration <= 0) {
+      Logger.skip("Skipping: Invalid video file or unable to read duration.");
+      continue;
+    }
+
     // Skip output files to prevent processing loops
     if (baseName.endsWith(opts.suffix)) {
       Logger.skip("Skipping: File appears to be an output file.");
@@ -492,6 +523,18 @@ const runConvert = async (opts: ConversionOptions) => {
     // Execute encoding process
     try {
       await FFmpegService.convert(file, tempPath, opts, parseInt(opts.resolution, 10));
+
+      // Post-conversion validation: Compare durations to ensure completeness
+      const convertedDuration = await FFmpegService.getDuration(tempPath);
+
+      if (convertedDuration <= 0 || Math.abs(originalDuration - convertedDuration) > 2) {
+        Logger.error(
+          `Duration mismatch! Original: ${originalDuration.toFixed(1)}s, Converted: ${convertedDuration.toFixed(1)}s`,
+        );
+        Logger.error("Conversion likely failed or truncated. Cleaning up temp file.");
+        if (await FileService.exists(tempPath)) await fs.unlink(tempPath);
+        continue;
+      }
 
       if (opts.preserveDates) {
         await FileService.copyStats(file, tempPath);
@@ -608,8 +651,20 @@ const runFinalize = async (opts: FinalizeOptions) => {
     try {
       let skipReplacement = false;
 
-      // Check space savings if the original still exists
       if (item.originalExists) {
+        // Pre-validation: Compare durations to ensure the MKV is complete
+        const oDuration = await FFmpegService.getDuration(item.originalPath);
+        const cDuration = await FFmpegService.getDuration(item.mkvPath);
+
+        if (oDuration <= 0 || cDuration <= 0 || Math.abs(oDuration - cDuration) > 2) {
+          Logger.error(
+            `Duration mismatch! Original: ${oDuration.toFixed(1)}s, Converted: ${cDuration.toFixed(1)}s`,
+          );
+          Logger.skip(`Skipping cleanup for: ${path.basename(item.originalPath)}`);
+          continue; // Skip processing this file completely
+        }
+
+        // Check space savings if the original still exists
         const oSize = await FileService.getSize(item.originalPath);
         const cSize = await FileService.getSize(item.mkvPath);
 
