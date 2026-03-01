@@ -85,16 +85,17 @@ const Logger = {
     return `${parseFloat((bytes / k ** i).toFixed(2))} ${sizes[i]}`;
   },
 
-  /** Formats milliseconds into a human-readable duration */
+  /** Formats milliseconds into hh:mm:ss */
   formatDuration: (ms: number): string => {
-    const seconds = Math.floor((ms / 1000) % 60);
-    const minutes = Math.floor((ms / (1000 * 60)) % 60);
-    const hours = Math.floor((ms / (1000 * 60 * 60)) % 24);
-    const parts = [];
-    if (hours > 0) parts.push(`${hours}h`);
-    if (minutes > 0) parts.push(`${minutes}m`);
-    if (seconds > 0 || parts.length === 0) parts.push(`${seconds}s`);
-    return parts.join(" ");
+    return Logger.formatDurationSeconds(ms / 1000);
+  },
+
+  /** Formats seconds into hh:mm:ss */
+  formatDurationSeconds: (totalSeconds: number): string => {
+    const hours = Math.floor(totalSeconds / 3600);
+    const minutes = Math.floor((totalSeconds % 3600) / 60);
+    const seconds = Math.floor(totalSeconds % 60);
+    return `${hours.toString().padStart(2, "0")}:${minutes.toString().padStart(2, "0")}:${seconds.toString().padStart(2, "0")}`;
   },
 
   /** CLI Yes/No prompt */
@@ -211,6 +212,53 @@ const Logger = {
           } else if (a.toLowerCase() === "s" || a.toLowerCase() === "skip") {
             rl.close();
             resolve("skip");
+          } else {
+            console.log("   ❌ Invalid option. Please try again.");
+            ask();
+          }
+        });
+      };
+      ask();
+    });
+  },
+
+  /** Duration mismatch prompt in finalize */
+  askDurationMismatch: (
+    filename: string,
+    origDuration: number,
+    convDuration: number,
+  ): Promise<"yes" | "yes_all" | "no" | "no_all"> => {
+    const rl = readline.createInterface({
+      input: process.stdin,
+      output: process.stdout,
+    });
+
+    return new Promise((resolve) => {
+      console.log(`\n⚠️  Converted file "${filename}" has a lower duration than the original!`);
+      console.log(`   Original:  ${Logger.formatDurationSeconds(origDuration)}`);
+      console.log(`   Converted: ${Logger.formatDurationSeconds(convDuration)}`);
+      console.log("\n   Do you want to finalize anyway (delete original, keep converted)?");
+      console.log("   [y] Yes (finalize anyway)");
+      console.log("   [n] No (skip this file)");
+      console.log("   [A] Yes to All");
+      console.log("   [N] No to All");
+
+      const ask = () => {
+        rl.question(`   Select option: `, (ans) => {
+          const a = ans.trim();
+
+          if (a === "A") {
+            rl.close();
+            resolve("yes_all");
+          } else if (a === "N") {
+            rl.close();
+            resolve("no_all");
+          } else if (a.toLowerCase() === "y" || a.toLowerCase() === "yes") {
+            rl.close();
+            resolve("yes");
+          } else if (a.toLowerCase() === "n" || a.toLowerCase() === "no") {
+            rl.close();
+            resolve("no");
           } else {
             console.log("   ❌ Invalid option. Please try again.");
             ask();
@@ -555,13 +603,15 @@ const runConvert = async (opts: ConversionOptions) => {
       // Post-conversion validation: Compare durations to ensure completeness
       const convertedDuration = await FFmpegService.getDuration(tempPath);
 
-      if (convertedDuration <= 0 || Math.abs(originalDuration - convertedDuration) > 2) {
-        Logger.error(
-          `Duration mismatch! Original: ${originalDuration.toFixed(1)}s, Converted: ${convertedDuration.toFixed(1)}s`,
-        );
-        Logger.error("Conversion likely failed or truncated. Cleaning up temp file.");
+      if (convertedDuration <= 0) {
+        Logger.error("Conversion failed or resulted in 0 duration. Cleaning up temp file.");
         if (await FileService.exists(tempPath)) await fs.unlink(tempPath);
         continue;
+      } else if (Math.abs(originalDuration - convertedDuration) > 2) {
+        Logger.warn(
+          `Duration mismatch! Original: ${Logger.formatDurationSeconds(originalDuration)}, Converted: ${Logger.formatDurationSeconds(convertedDuration)}`,
+        );
+        Logger.warn("Conversion completed but with duration difference.");
       }
 
       if (opts.preserveDates) {
@@ -677,6 +727,7 @@ const runFinalize = async (opts: FinalizeOptions) => {
   let deletedCount = 0;
   let renamedCount = 0;
   let largerFilePolicy: "ask" | "delete_converted" | "keep_converted" | "skip_all" = "ask";
+  let durationMismatchPolicy: "ask" | "yes" | "no" = "ask";
 
   for (const item of toProcess) {
     try {
@@ -687,13 +738,43 @@ const runFinalize = async (opts: FinalizeOptions) => {
         const oDuration = await FFmpegService.getDuration(item.originalPath);
         const cDuration = await FFmpegService.getDuration(item.mkvPath);
 
-        if (oDuration <= 0 || cDuration <= 0 || Math.abs(oDuration - cDuration) > 2) {
-          Logger.error(
-            `Duration mismatch! Original: ${oDuration.toFixed(1)}s, Converted: ${cDuration.toFixed(1)}s`,
-          );
-          Logger.skip(`Skipping cleanup for: ${path.basename(item.originalPath)}`);
+        if (oDuration <= 0 || cDuration <= 0) {
+          Logger.error("Invalid duration (<=0). Skipping cleanup.");
           continue; // Skip processing this file completely
         }
+
+        if (oDuration - cDuration > 2) {
+          if (opts.dryRun) {
+            Logger.warn(
+              `[DRY RUN] ⚠️  ${path.basename(item.mkvPath)} has a lower duration. User would be prompted.`,
+            );
+            skipReplacement = true;
+          } else {
+            let action = "ask";
+            if (durationMismatchPolicy === "yes") action = "yes";
+            else if (durationMismatchPolicy === "no") action = "no";
+
+            if (action === "ask") {
+              const answer = await Logger.askDurationMismatch(path.basename(item.mkvPath), oDuration, cDuration);
+              if (answer === "yes_all") {
+                durationMismatchPolicy = "yes";
+                action = "yes";
+              } else if (answer === "no_all") {
+                durationMismatchPolicy = "no";
+                action = "no";
+              } else {
+                action = answer;
+              }
+            }
+
+            if (action === "no") {
+              Logger.skip(`Skipping cleanup for: ${path.basename(item.originalPath)} due to lower duration`);
+              skipReplacement = true;
+            }
+          }
+        }
+        
+        if (skipReplacement) continue;
 
         // Check space savings if the original still exists
         const oSize = await FileService.getSize(item.originalPath);
