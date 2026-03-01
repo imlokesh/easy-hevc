@@ -726,6 +726,7 @@ const runFinalize = async (opts: FinalizeOptions) => {
 
   let deletedCount = 0;
   let renamedCount = 0;
+  let totalDeletedSize = 0;
   let largerFilePolicy: "ask" | "delete_converted" | "keep_converted" | "skip_all" = "ask";
   let durationMismatchPolicy: "ask" | "yes" | "no" = "ask";
 
@@ -811,8 +812,9 @@ const runFinalize = async (opts: FinalizeOptions) => {
 
             if (action === "yes") {
               // Delete converted, keep original
+              totalDeletedSize += cSize;
               await fs.unlink(item.mkvPath);
-              Logger.info(`🗑️  Deleted Larger Converted File: ${path.basename(item.mkvPath)}`);
+              Logger.info(`🗑️  Deleted Larger Converted File: ${path.basename(item.mkvPath)} (${Logger.formatBytes(cSize)})`);
               skipReplacement = true;
             } else if (action === "skip") {
               Logger.skip(`Skipping cleanup for: ${path.basename(item.originalPath)}`);
@@ -827,13 +829,16 @@ const runFinalize = async (opts: FinalizeOptions) => {
 
       // Step 1: Delete original file if it exists
       if (item.originalExists) {
+        const oSize = await FileService.getSize(item.originalPath);
         if (opts.dryRun) {
-          Logger.info(`[DRY RUN] Would delete original: ${path.basename(item.originalPath)}`);
+          Logger.info(`[DRY RUN] Would delete original: ${path.basename(item.originalPath)} (${Logger.formatBytes(oSize)})`);
           deletedCount++;
+          totalDeletedSize += oSize;
         } else {
           await fs.unlink(item.originalPath);
-          Logger.info(`🗑️  Deleted Original: ${path.basename(item.originalPath)}`);
+          Logger.info(`🗑️  Deleted Original: ${path.basename(item.originalPath)} (${Logger.formatBytes(oSize)})`);
           deletedCount++;
+          totalDeletedSize += oSize;
         }
       }
 
@@ -861,7 +866,7 @@ const runFinalize = async (opts: FinalizeOptions) => {
 
   Logger.divider();
   Logger.success(opts.dryRun ? "Dry Run Complete." : "Cleanup Complete.");
-  Logger.info(`Originals Deleted: ${deletedCount}`);
+  Logger.info(`Originals Deleted: ${deletedCount} (${Logger.formatBytes(totalDeletedSize)})`);
   Logger.info(`Files Renamed: ${renamedCount}`);
 };
 
