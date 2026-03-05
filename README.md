@@ -1,8 +1,10 @@
 # Easy HEVC
 
-Easy HEVC is a command-line tool that helps you convert videos to HEVC (H.265) in bulk.
+Easy HEVC is a command-line tool that helps you convert videos to HEVC (H.265) in bulk. 
 
-It scans folders recursively, converts supported video files with FFmpeg, and keeps your originals safe until you decide to finalize. 
+It scans folders recursively, converts supported video files with FFmpeg, and keeps your originals safe until you decide to finalize. It automatically detects already converted files and warns you if the output video is larger that input. 
+
+Use this tool to instantly cleanup massive storage space by converting large video files to a more effecient format. As the conversion is lossy, it is only recommended for archived videos (files you may only rarely need in future), unless you know what you're doing. 
 
 ## Why use it?
 
