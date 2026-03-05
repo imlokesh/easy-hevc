@@ -1,41 +1,75 @@
-# 🎬 Easy HEVC
+# Easy HEVC
 
-A smart, interactive CLI tool to batch convert your video library to HEVC (H.265) and save massive amounts of disk space. 
+Easy HEVC is a command-line tool that batch-converts videos to HEVC (H.265) using FFmpeg.
 
-**Easy HEVC** recursively scans your folders, encodes videos using FFmpeg, tracks original filenames via MKV metadata, and safely replaces the original files only when space is actually saved.
+It scans files recursively, writes conversion metadata into MKV output, and only replaces originals when the new file is actually smaller.
 
-## ✨ Features
+## Why use it?
 
-* **Batch & Recursive Scanning:** Point it at a folder, and it finds all the videos.
-* **Smart Storage Checks:** Automatically keeps the original file if the "compressed" version ends up being larger.
-* **Conflict Resolution:** Pauses to ask what you want to do if it finds previously converted files or encounters size conflicts.
-* **Metadata Tagging:** Embeds original filename, resolution, CRF, and preset data directly into the newly converted MKV files for easy tracking.
-* **Safe Cleanup:** Separate `convert` and `finalize` commands mean you can verify your encoded videos before deleting the originals. Includes a `--dry-run` mode!
+- **Save storage space** across large video folders.
+- **Process folders recursively** without writing scripts.
+- **Keep control of cleanup** with separate `convert` and `finalize` steps.
+- **Avoid accidental data loss** with prompts and a `--dry-run` mode.
 
+## Prerequisites
 
+Install FFmpeg (includes `ffmpeg` and `ffprobe`) and ensure both are available in your `PATH`.
 
-## ⚙️ Prerequisites
+- **macOS:** `brew install ffmpeg`
+- **Linux (Debian/Ubuntu):** `sudo apt install ffmpeg`
+- **Windows:** `winget install ffmpeg`
 
-You must have **FFmpeg** and **FFprobe** installed and available in your system's PATH.
+## Installation
 
-* **macOS:** `brew install ffmpeg`
-* **Linux (Debian/Ubuntu):** `sudo apt install ffmpeg`
-* **Windows:** `winget install ffmpeg`
-
-
-
-## 🚀 Installation
-
-We recommend [Bun](https://bun.sh/), a blazing-fast JavaScript runtime. Make sure you have Bun installed, then install Easy HEVC globally:
+Install globally with [Bun](https://bun.sh/):
 
 ```bash
 bun add -g easy-hevc
 ```
 
+## Quick start
 
-## 🛠️ Usage
+### 1) Convert videos
 
+Convert all videos in the current directory (and subdirectories):
+
+```bash
+easy-hevc -i .
 ```
+
+A more explicit example:
+
+```bash
+easy-hevc -i . --crf 23 --resolution 720
+```
+
+To process larger files first:
+
+```bash
+easy-hevc -i . --sort-by-size
+```
+
+### 2) Review results
+
+Converted files are written with a suffix (default: `_converted`) so originals are kept for review.
+
+### 3) Finalize (optional)
+
+When you are happy with the converted files, replace originals:
+
+```bash
+easy-hevc finalize -i .
+```
+
+Preview finalize actions without changing files:
+
+```bash
+easy-hevc finalize -i . --dry-run
+```
+
+## Command reference
+
+```text
 $ easy-hevc --help
 
 easy-hevc - A CLI tool to batch convert video files to HEVC (H.265) format.
@@ -62,23 +96,9 @@ COMMANDS
   finalize             Delete originals and rename converted files to replace them.
 ```
 
-The following command will convert all videos in the current directory to HEVC/H.265:
+### Finalize help
 
-```
-$ easy-hevc -i . --crf 23 --resolution 720
-```
-
-To process larger files first:
-
-```
-$ easy-hevc -i . --sort-by-size
-```
-
-### Finalize command
-
-The `finalize` command will delete the original files and rename the converted files to replace them.
-
-```
+```text
 $ easy-hevc finalize --help
 
 Delete originals and rename converted files to replace them.
@@ -91,5 +111,4 @@ Command Options (finalize)
 
 Global Options
   -h, --help                              Show help information
-
 ```
