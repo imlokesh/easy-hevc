@@ -54,6 +54,7 @@ Default Command Options (convert)
       --delete-original                   Delete source if smaller default: false
       --preserve-dates                    Keep original file modification timestamps default: true
       --no-preserve-dates
+      --sort-by-size                      Sort files by size before converting (largest first) default: false
   -h, --help                              Show help information
 
 COMMANDS
@@ -65,6 +66,12 @@ The following command will convert all videos in the current directory to HEVC/H
 
 ```
 $ easy-hevc -i . --crf 23 --resolution 720
+```
+
+To process larger files first:
+
+```
+$ easy-hevc -i . --sort-by-size
 ```
 
 ### Finalize command

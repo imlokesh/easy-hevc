@@ -42,6 +42,8 @@ interface ConversionOptions {
   deleteOriginal: boolean;
   /** If true, copies file modification times to the new file */
   preserveDates: boolean;
+  /** If true, process larger files first */
+  sortBySize: boolean;
 }
 
 /** CLI options for the `finalize` command */
@@ -516,10 +518,19 @@ const runConvert = async (opts: ConversionOptions) => {
   }
 
   // Build file collection
-  const files = await FileService.scan(opts.input);
+  let files = await FileService.scan(opts.input);
   if (files.length === 0) {
     Logger.warn("No video files found.");
     process.exit(0);
+  }
+
+  if (opts.sortBySize) {
+    Logger.info("Sorting files by size (largest first)...");
+    const withSizes = await Promise.all(
+      files.map(async (file) => ({ file, size: await FileService.getSize(file) })),
+    );
+    withSizes.sort((a, b) => b.size - a.size);
+    files = withSizes.map((item) => item.file);
   }
 
   Logger.info(`Found ${files.length} files. Target: ${opts.resolution}p, CRF: ${opts.crf}`);
@@ -924,6 +935,11 @@ const main = async () => {
             negatable: true,
             description: "Keep original file modification timestamps",
           },
+          "sort-by-size": {
+            type: "boolean",
+            default: false,
+            description: "Sort files by size before converting (largest first)",
+          },
         },
       },
       finalize: {
@@ -961,6 +977,7 @@ const main = async () => {
       preset: commandOptions.preset as string,
       deleteOriginal: commandOptions["delete-original"] as boolean,
       preserveDates: commandOptions["preserve-dates"] as boolean,
+      sortBySize: commandOptions["sort-by-size"] as boolean,
     });
   } else if (command === "finalize") {
     await runFinalize({
