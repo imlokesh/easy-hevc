@@ -1,95 +1,111 @@
-# 🎬 Easy HEVC
+# Easy HEVC
 
-A smart, interactive CLI tool to batch convert your video library to HEVC (H.265) and save massive amounts of disk space. 
+Easy HEVC is a command-line tool that helps you convert videos to HEVC (H.265) in bulk. 
 
-**Easy HEVC** recursively scans your folders, encodes videos using FFmpeg, tracks original filenames via MKV metadata, and safely replaces the original files only when space is actually saved.
+It scans folders recursively, converts supported video files with FFmpeg, and keeps your originals safe until you decide to finalize. It automatically detects already converted files and warns you if the output video is larger that input. 
 
-## ✨ Features
+Use this tool to instantly cleanup massive storage space by converting large video files to a more effecient format. As the conversion is lossy, it is only recommended for archived videos (files you may only rarely need in future), unless you know what you're doing. 
 
-* **Batch & Recursive Scanning:** Point it at a folder, and it finds all the videos.
-* **Smart Storage Checks:** Automatically keeps the original file if the "compressed" version ends up being larger.
-* **Conflict Resolution:** Pauses to ask what you want to do if it finds previously converted files or encounters size conflicts.
-* **Metadata Tagging:** Embeds original filename, resolution, CRF, and preset data directly into the newly converted MKV files for easy tracking.
-* **Safe Cleanup:** Separate `convert` and `finalize` commands mean you can verify your encoded videos before deleting the originals. Includes a `--dry-run` mode!
+## Why use it?
 
+- Convert many videos in one run (including nested folders).
+- Reduce storage usage with configurable quality settings.
+- Review converted files before deleting originals.
+- Preserve useful metadata so converted files can still be traced back to their source.
 
+## Prerequisites
 
-## ⚙️ Prerequisites
+Install **FFmpeg** (includes `ffprobe`) and make sure it is available in your `PATH`.
 
-You must have **FFmpeg** and **FFprobe** installed and available in your system's PATH.
+- **macOS:** `brew install ffmpeg`
+- **Ubuntu / Debian:** `sudo apt install ffmpeg`
+- **Windows:** `winget install ffmpeg`
 
-* **macOS:** `brew install ffmpeg`
-* **Linux (Debian/Ubuntu):** `sudo apt install ffmpeg`
-* **Windows:** `winget install ffmpeg`
+## Installation
 
-
-
-## 🚀 Installation
-
-We recommend [Bun](https://bun.sh/), a blazing-fast JavaScript runtime. Make sure you have Bun installed, then install Easy HEVC globally:
+Install with Bun:
 
 ```bash
 bun add -g easy-hevc
 ```
 
+## Quick start
 
-## 🛠️ Usage
+### 1) Convert videos
 
-```
-$ easy-hevc --help
+Run conversion on a file or directory:
 
-easy-hevc - A CLI tool to batch convert video files to HEVC (H.265) format.
-
-Global Options
-  -h, --help                              Show help information
-
-Default Command Options (convert)
-  -i, --input                             Input file or folder <string>, required
-  -s, --suffix, HEVC_SUFFIX               Output suffix <string>, default: _converted
-      --resolution, HEVC_RES              Output file resolution(height).  <string>, default: 1080
-                                          choices: 2160|1440|1080|720|540|480|360
-      --crf, HEVC_CRF                     <number>, default: 24
-      --preset, HEVC_PRESET               <string>, default: medium
-                                          choices: fast|medium|slow|veryslow
-      --delete-original                   Delete source if smaller default: false
-      --preserve-dates                    Keep original file modification timestamps default: true
-      --no-preserve-dates
-      --sort-by-size                      Sort files by size before converting (largest first) default: false
-  -h, --help                              Show help information
-
-COMMANDS
-  convert (default)    Convert videos to HEVC/H.265
-  finalize             Delete originals and rename converted files to replace them.
+```bash
+easy-hevc -i /path/to/videos
 ```
 
-The following command will convert all videos in the current directory to HEVC/H.265:
+Example with custom quality and resolution:
 
-```
-$ easy-hevc -i . --crf 23 --resolution 720
-```
-
-To process larger files first:
-
-```
-$ easy-hevc -i . --sort-by-size
+```bash
+easy-hevc -i . --crf 23 --resolution 720
 ```
 
-### Finalize command
+Process larger files first:
 
-The `finalize` command will delete the original files and rename the converted files to replace them.
-
+```bash
+easy-hevc -i . --sort-by-size
 ```
-$ easy-hevc finalize --help
 
-Delete originals and rename converted files to replace them.
+### 2) Review output
 
-Command Options (finalize)
-  -i, --input                             Input folder to clean <string>, required
-  -f, --force                             Skip confirmation prompts default: false
-  -d, --dry-run                           Simulate actions without deleting files default: false
-  -h, --help                              Show help information
+Check converted files and verify quality/size savings.
 
-Global Options
-  -h, --help                              Show help information
+### 3) Finalize
 
+Once you're happy, replace originals with converted files:
+
+```bash
+easy-hevc finalize -i /path/to/videos
 ```
+
+Preview finalize actions without making changes:
+
+```bash
+easy-hevc finalize -i /path/to/videos --dry-run
+```
+
+## Commands
+
+### `convert` (default)
+
+Converts videos to HEVC/H.265.
+
+```text
+-i, --input                 Input file or folder (required)
+-s, --suffix                Output suffix (default: _converted)
+    --resolution            Output height (default: 1080)
+                            choices: 2160|1440|1080|720|540|480|360
+    --crf                   Constant Rate Factor (default: 24)
+    --preset                Encoder preset (default: medium)
+                            choices: fast|medium|slow|veryslow
+    --delete-original       Delete source if converted file is smaller
+    --preserve-dates        Preserve modification timestamps (default: true)
+    --no-preserve-dates
+    --sort-by-size          Convert largest files first
+-h, --help                  Show help
+```
+
+### `finalize`
+
+Deletes originals and renames converted files to replace them.
+
+```text
+-i, --input                 Input folder (required)
+-f, --force                 Skip confirmation prompts
+-d, --dry-run               Simulate actions only
+-h, --help                  Show help
+```
+
+## Typical workflow
+
+1. Run `easy-hevc -i <folder>`.
+2. Inspect results and spot-check playback quality.
+3. Run `easy-hevc finalize -i <folder> --dry-run`.
+4. Run `easy-hevc finalize -i <folder>` when ready.
+
+This two-step workflow helps avoid accidental data loss.
