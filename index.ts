@@ -679,6 +679,59 @@ const runFinalize = async (opts: FinalizeOptions) => {
   // Locate all video files and filter specifically for MKVs
   const allFiles = await FileService.scan(opts.input);
   const mkvFiles = allFiles.filter((f) => f.toLowerCase().endsWith(".mkv"));
+  const danglingTempCandidates = mkvFiles.filter((f) => f.toLowerCase().endsWith(".temp.mkv"));
+  const easyHevcTempFiles: string[] = [];
+
+  for (const tempFile of danglingTempCandidates) {
+    const originalTag = await FFmpegService.getOriginalFilenameTag(tempFile);
+    if (originalTag) {
+      easyHevcTempFiles.push(tempFile);
+    }
+  }
+
+  if (danglingTempCandidates.length > 0 && easyHevcTempFiles.length === 0) {
+    Logger.info("Found temp MKVs, but none contain easy-hevc metadata. Skipping temp cleanup.");
+  }
+
+  if (easyHevcTempFiles.length > 0) {
+    Logger.warn(`Found ${easyHevcTempFiles.length} easy-hevc dangling temp file(s).`);
+
+    const skippedTempFiles = danglingTempCandidates.length - easyHevcTempFiles.length;
+    if (skippedTempFiles > 0) {
+      Logger.info(`Ignoring ${skippedTempFiles} user temp file(s) without easy-hevc metadata.`);
+    }
+
+    let cleanupTempFiles = false;
+    if (opts.dryRun) {
+      cleanupTempFiles = true;
+    } else if (opts.force) {
+      cleanupTempFiles = true;
+      Logger.info("--force enabled. Cleaning dangling easy-hevc temp files automatically.");
+    } else {
+      cleanupTempFiles = await Logger.confirm(
+        `Do you want to cleanup ${easyHevcTempFiles.length} dangling easy-hevc temp file(s) (*.temp.mkv)?`,
+      );
+    }
+
+    if (cleanupTempFiles) {
+      for (const tempFile of easyHevcTempFiles) {
+        const tempName = path.basename(tempFile);
+        if (opts.dryRun) {
+          Logger.info(`[DRY RUN] Would delete temp file: ${tempName}`);
+        } else {
+          try {
+            await fs.unlink(tempFile);
+            Logger.info(`🧹 Deleted temp file: ${tempName}`);
+          } catch (e: unknown) {
+            if (e instanceof Error) {
+              Logger.error(`Failed to delete temp file ${tempName}: ${e.message}`);
+            }
+          }
+        }
+      }
+      Logger.divider();
+    }
+  }
 
   const toProcess: Array<{
     mkvPath: string;
@@ -751,7 +804,9 @@ const runFinalize = async (opts: FinalizeOptions) => {
         const cDuration = await FFmpegService.getDuration(item.mkvPath);
 
         if (oDuration <= 0 || cDuration <= 0) {
-          Logger.error("Invalid duration (<=0). Skipping cleanup.");
+          Logger.error(
+            `Invalid duration (<=0) for ${path.basename(item.mkvPath)} (original: ${path.basename(item.originalPath)}). Skipping cleanup.`,
+          );
           continue; // Skip processing this file completely
         }
 
