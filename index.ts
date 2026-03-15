@@ -680,52 +680,24 @@ const runFinalize = async (opts: FinalizeOptions) => {
   const allFiles = await FileService.scan(opts.input);
   const mkvFiles = allFiles.filter((f) => f.toLowerCase().endsWith(".mkv"));
   const danglingTempCandidates = mkvFiles.filter((f) => f.toLowerCase().endsWith(".temp.mkv"));
-  const easyHevcTempFiles: string[] = [];
+  const deletedTempFiles = [] as string[];
 
   for (const tempFile of danglingTempCandidates) {
     const originalTag = await FFmpegService.getOriginalFilenameTag(tempFile);
     if (originalTag) {
-      easyHevcTempFiles.push(tempFile);
-    }
-  }
-
-  if (danglingTempCandidates.length > 0 && easyHevcTempFiles.length === 0) {
-    Logger.info("Found temp MKVs, but none contain easy-hevc metadata. Skipping temp cleanup.");
-  }
-
-  if (easyHevcTempFiles.length > 0) {
-    Logger.warn(`Found ${easyHevcTempFiles.length} easy-hevc dangling temp file(s).`);
-
-    const skippedTempFiles = danglingTempCandidates.length - easyHevcTempFiles.length;
-    if (skippedTempFiles > 0) {
-      Logger.info(`Ignoring ${skippedTempFiles} user temp file(s) without easy-hevc metadata.`);
-    }
-
-    let cleanupTempFiles = false;
-    if (opts.dryRun) {
-      cleanupTempFiles = true;
-    } else if (opts.force) {
-      cleanupTempFiles = true;
-      Logger.info("--force enabled. Cleaning dangling easy-hevc temp files automatically.");
-    } else {
-      cleanupTempFiles = await Logger.confirm(
-        `Do you want to cleanup ${easyHevcTempFiles.length} dangling easy-hevc temp file(s) (*.temp.mkv)?`,
-      );
-    }
-
-    if (cleanupTempFiles) {
-      for (const tempFile of easyHevcTempFiles) {
-        const tempName = path.basename(tempFile);
-        if (opts.dryRun) {
-          Logger.info(`[DRY RUN] Would delete temp file: ${tempName}`);
-        } else {
-          try {
-            await fs.unlink(tempFile);
-            Logger.info(`🧹 Deleted temp file: ${tempName}`);
-          } catch (e: unknown) {
-            if (e instanceof Error) {
-              Logger.error(`Failed to delete temp file ${tempName}: ${e.message}`);
-            }
+      Logger.info(`Deleting easy-hevc temp file: ${tempFile}`);
+      const tempName = path.basename(tempFile);
+      if (opts.dryRun) {
+        deletedTempFiles.push(tempFile);
+        Logger.info(`[DRY RUN] Would delete temp file: ${tempName}`);
+      } else {
+        try {
+          await fs.unlink(tempFile);
+          deletedTempFiles.push(tempFile);
+          Logger.info(`🧹 Deleted temp file: ${tempName}`);
+        } catch (e: unknown) {
+          if (e instanceof Error) {
+            Logger.error(`Failed to delete temp file ${tempName}: ${e.message}`);
           }
         }
       }
@@ -742,7 +714,7 @@ const runFinalize = async (opts: FinalizeOptions) => {
   }> = [];
 
   // Inspect each MKV for the converted metadata tag
-  for (const mkv of mkvFiles) {
+  for (const mkv of mkvFiles.filter((f) => !deletedTempFiles.includes(f))) {
     const originalFilename = await FFmpegService.getOriginalFilenameTag(mkv);
 
     // Skip if it doesn't have the tag (not a converted file)
@@ -822,7 +794,11 @@ const runFinalize = async (opts: FinalizeOptions) => {
             else if (durationMismatchPolicy === "no") action = "no";
 
             if (action === "ask") {
-              const answer = await Logger.askDurationMismatch(path.basename(item.mkvPath), oDuration, cDuration);
+              const answer = await Logger.askDurationMismatch(
+                path.basename(item.mkvPath),
+                oDuration,
+                cDuration,
+              );
               if (answer === "yes_all") {
                 durationMismatchPolicy = "yes";
                 action = "yes";
@@ -835,12 +811,14 @@ const runFinalize = async (opts: FinalizeOptions) => {
             }
 
             if (action === "no") {
-              Logger.skip(`Skipping cleanup for: ${path.basename(item.originalPath)} due to lower duration`);
+              Logger.skip(
+                `Skipping cleanup for: ${path.basename(item.originalPath)} due to lower duration`,
+              );
               skipReplacement = true;
             }
           }
         }
-        
+
         if (skipReplacement) continue;
 
         // Check space savings if the original still exists
@@ -880,7 +858,9 @@ const runFinalize = async (opts: FinalizeOptions) => {
               // Delete converted, keep original
               totalDeletedSize += cSize;
               await fs.unlink(item.mkvPath);
-              Logger.info(`🗑️  Deleted Larger Converted File: ${path.basename(item.mkvPath)} (${Logger.formatBytes(cSize)})`);
+              Logger.info(
+                `🗑️  Deleted Larger Converted File: ${path.basename(item.mkvPath)} (${Logger.formatBytes(cSize)})`,
+              );
               skipReplacement = true;
             } else if (action === "skip") {
               Logger.skip(`Skipping cleanup for: ${path.basename(item.originalPath)}`);
@@ -897,12 +877,16 @@ const runFinalize = async (opts: FinalizeOptions) => {
       if (item.originalExists) {
         const oSize = await FileService.getSize(item.originalPath);
         if (opts.dryRun) {
-          Logger.info(`[DRY RUN] Would delete original: ${path.basename(item.originalPath)} (${Logger.formatBytes(oSize)})`);
+          Logger.info(
+            `[DRY RUN] Would delete original: ${path.basename(item.originalPath)} (${Logger.formatBytes(oSize)})`,
+          );
           deletedCount++;
           totalDeletedSize += oSize;
         } else {
           await fs.unlink(item.originalPath);
-          Logger.info(`🗑️  Deleted Original: ${path.basename(item.originalPath)} (${Logger.formatBytes(oSize)})`);
+          Logger.info(
+            `🗑️  Deleted Original: ${path.basename(item.originalPath)} (${Logger.formatBytes(oSize)})`,
+          );
           deletedCount++;
           totalDeletedSize += oSize;
         }
