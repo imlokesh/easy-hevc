@@ -44,6 +44,8 @@ interface ConversionOptions {
   preserveDates: boolean;
   /** If true, process larger files first */
   sortBySize: boolean;
+  /** If true, simulates conversions without writing files */
+  dryRun: boolean;
 }
 
 /** CLI options for the `finalize` command */
@@ -506,12 +508,13 @@ const FileService = {
 // --- Primary Command: Convert ---
 
 const runConvert = async (opts: ConversionOptions) => {
-  Logger.header("Starting Video Compression");
+  Logger.header(opts.dryRun ? "Starting Video Compression (DRY RUN MODE)" : "Starting Video Compression");
 
   // Verify CLI dependencies
   try {
-    await FFmpegService.checkBinary("ffmpeg");
-    await FFmpegService.checkBinary("ffprobe");
+    for (const binary of ["ffmpeg", "ffprobe"]) {
+      await FFmpegService.checkBinary(binary);
+    }
   } catch (e: unknown) {
     if (e instanceof Error) Logger.error(e.message);
     process.exit(1);
@@ -602,6 +605,16 @@ const runConvert = async (opts: ConversionOptions) => {
       continue;
     }
 
+    if (opts.dryRun) {
+      Logger.info(`[DRY RUN] Would convert to: ${outputName}`);
+      Logger.info(`[DRY RUN] Temporary file: ${tempName}`);
+      if (opts.deleteOriginal) {
+        Logger.info("[DRY RUN] Would delete original if the converted file is smaller.");
+      }
+      successCount++;
+      continue;
+    }
+
     // Execute encoding process
     try {
       const elapsedMs = await FFmpegService.convert(
@@ -666,7 +679,7 @@ const runConvert = async (opts: ConversionOptions) => {
 
   Logger.header("Summary");
   Logger.info(`Processed: ${files.length}`);
-  Logger.success(`Successful: ${successCount}`);
+  Logger.success(opts.dryRun ? `Planned: ${successCount}` : `Successful: ${successCount}`);
   Logger.info(`Total Space Saved: ${Logger.formatBytes(totalSaved)}`);
 };
 
@@ -979,6 +992,12 @@ const main = async () => {
             default: false,
             description: "Sort files by size before converting (largest first)",
           },
+          "dry-run": {
+            type: "boolean",
+            short: "d",
+            default: false,
+            description: "Simulate conversions without writing files",
+          },
         },
       },
       finalize: {
@@ -1017,6 +1036,7 @@ const main = async () => {
       deleteOriginal: commandOptions["delete-original"] as boolean,
       preserveDates: commandOptions["preserve-dates"] as boolean,
       sortBySize: commandOptions["sort-by-size"] as boolean,
+      dryRun: commandOptions["dry-run"] as boolean,
     });
   } else if (command === "finalize") {
     await runFinalize({
