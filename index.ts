@@ -38,8 +38,8 @@ interface ConversionOptions {
   crf: number;
   /** FFmpeg preset (e.g., "fast", "medium", "slow") */
   preset: string;
-  /** If true, deletes the original file immediately if conversion saves space */
-  deleteOriginal: boolean;
+  /** If true, delete the original and rename the converted file to the original base name */
+  finalize: boolean;
   /** If true, copies file modification times to the new file */
   preserveDates: boolean;
   /** If true, process larger files first */
@@ -601,12 +601,15 @@ const runConvert = async (opts: ConversionOptions) => {
     }
 
     // Define target paths
-    const outputName = `${baseName}${opts.suffix}.mkv`;
+    const outputName = opts.finalize ? `${baseName}.mkv` : `${baseName}${opts.suffix}.mkv`;
     const tempName = `${baseName}${opts.suffix}.temp.mkv`;
     const outputPath = path.join(fileInfo.dir, outputName);
     const tempPath = path.join(fileInfo.dir, tempName);
 
-    if (await FileService.exists(outputPath)) {
+    const outputExists = await FileService.exists(outputPath);
+    const outputConflict = outputExists && (!opts.finalize || outputPath !== file);
+
+    if (outputConflict) {
       Logger.skip("Skipping: Converted file already exists.");
       continue;
     }
@@ -614,8 +617,8 @@ const runConvert = async (opts: ConversionOptions) => {
     if (opts.dryRun) {
       Logger.info(`[DRY RUN] Would convert to: ${outputName}`);
       Logger.info(`[DRY RUN] Temporary file: ${tempName}`);
-      if (opts.deleteOriginal) {
-        Logger.info("[DRY RUN] Would delete original if the converted file is smaller.");
+      if (opts.finalize) {
+        Logger.info("[DRY RUN] Would delete the original and rename the converted file if it is smaller.");
       }
       successCount++;
       continue;
@@ -661,11 +664,13 @@ const runConvert = async (opts: ConversionOptions) => {
         );
         Logger.success(`Saved: ${Logger.formatBytes(savedBytes)} (${savedPercent}%)`);
 
-        await fs.rename(tempPath, outputPath);
-
-        if (opts.deleteOriginal) {
+        if (opts.finalize) {
           await fs.unlink(file);
+          await fs.rename(tempPath, outputPath);
           Logger.info("🗑️  Original file deleted.");
+          Logger.info(`📦 Finalized: ${path.basename(outputPath)}`);
+        } else {
+          await fs.rename(tempPath, outputPath);
         }
         totalSaved += savedBytes;
         successCount++;
@@ -982,10 +987,10 @@ const main = async () => {
             env: "HEVC_PRESET",
             choices: ["fast", "medium", "slow", "veryslow"],
           },
-          "delete-original": {
+          finalize: {
             type: "boolean",
             default: false,
-            description: "Delete source if smaller",
+            description: "Delete the original and rename the converted file to the original base name if smaller",
           },
           "preserve-dates": {
             type: "boolean",
@@ -1039,7 +1044,7 @@ const main = async () => {
       resolution: commandOptions.resolution as Resolution,
       crf: commandOptions.crf as number,
       preset: commandOptions.preset as string,
-      deleteOriginal: commandOptions["delete-original"] as boolean,
+      finalize: commandOptions.finalize as boolean,
       preserveDates: commandOptions["preserve-dates"] as boolean,
       sortBySize: commandOptions["sort-by-size"] as boolean,
       dryRun: commandOptions["dry-run"] as boolean,
