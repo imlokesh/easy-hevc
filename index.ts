@@ -522,6 +522,7 @@ const runConvert = async (opts: ConversionOptions) => {
 
   // Build file collection
   let files = await FileService.scan(opts.input);
+  const fileSizes = new Map<string, number>();
   if (files.length === 0) {
     Logger.warn("No video files found.");
     process.exit(0);
@@ -532,6 +533,9 @@ const runConvert = async (opts: ConversionOptions) => {
     const withSizes = await Promise.all(
       files.map(async (file) => ({ file, size: await FileService.getSize(file) })),
     );
+    for (const item of withSizes) {
+      fileSizes.set(item.file, item.size);
+    }
     withSizes.sort((a, b) => b.size - a.size);
     files = withSizes.map((item) => item.file);
   }
@@ -547,9 +551,11 @@ const runConvert = async (opts: ConversionOptions) => {
     const file = files[i];
     const fileInfo = path.parse(file);
     const baseName = fileInfo.name;
+    const originalSize = opts.sortBySize ? fileSizes.get(file) : undefined;
+    const processingSizeLabel = originalSize === undefined ? "" : ` (${Logger.formatBytes(originalSize)})`;
 
     Logger.divider();
-    Logger.info(`[${i + 1}/${files.length}] Processing: ${fileInfo.base}`);
+    Logger.info(`[${i + 1}/${files.length}] Processing: ${fileInfo.base}${processingSizeLabel}`);
 
     // Pre-validation: Check duration to ensure it's a valid video file
     const originalDuration = await FFmpegService.getDuration(file);
