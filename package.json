@@ -15,7 +15,8 @@
     "dev": "bun run index.ts",
     "test": "bun test",
     "build": "bun build index.ts --outfile=dist/index.js --target=node --format=esm",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run build",
+    "release:patch": "bun pm version patch && git push --follow-tags"
   },
   "dependencies": {
     "@imlokesh/clide": "latest"
