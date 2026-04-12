@@ -678,7 +678,12 @@ const runConvert = async (opts: ConversionOptions) => {
         Logger.warn(
           `File grew by ${Logger.formatBytes(Math.abs(savedBytes))} (Took ${formattedTime}). Keeping original.`,
         );
-        await fs.rename(tempPath, outputPath);
+        if (opts.finalize) {
+          await fs.unlink(tempPath);
+          Logger.info("🧹 Removed converted file because it is larger than the original.");
+        } else {
+          await fs.rename(tempPath, outputPath);
+        }
       }
     } catch (err: unknown) {
       if (err instanceof Error) {
