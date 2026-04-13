@@ -373,6 +373,10 @@ const FFmpegService = {
 
     return new Promise((resolve, reject) => {
       const args = [
+        "-fflags",
+        "+genpts+discardcorrupt",
+        "-err_detect",
+        "ignore_err",
         "-i",
         input,
         "-map",
