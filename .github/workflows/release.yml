@@ -4,6 +4,16 @@ on:
   push:
     tags:
       - "v*"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag to release or retry (e.g. v1.0.16)
+        required: true
+        type: string
+
+concurrency:
+  group: release-${{ inputs.tag || github.ref_name }}
+  cancel-in-progress: false
 
 jobs:
   release:
@@ -14,8 +24,9 @@ jobs:
 
     steps:
       - name: Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v6
         with:
+          ref: ${{ inputs.tag || github.ref }}
           fetch-depth: 0
 
       - name: Setup Bun
@@ -24,27 +35,53 @@ jobs:
           bun-version: latest
 
       - name: Setup Node.js
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@v6
         with:
-          node-version: '20'
-          registry-url: 'https://registry.npmjs.org'
+          node-version: '24'
+          package-manager-cache: false
+
+      - name: Setup npm with trusted publishing support
+        run: npm install --global npm@11.20.0
+
+      - name: Validate release tag
+        env:
+          RELEASE_TAG: ${{ inputs.tag || github.ref_name }}
+        run: |
+          VERSION=$(node -p "require('./package.json').version")
+          test "$RELEASE_TAG" = "v$VERSION"
+          test "$(git rev-parse HEAD)" = "$(git rev-parse "refs/tags/$RELEASE_TAG^{commit}")"
 
       - name: Install Dependencies
         run: bun install --frozen-lockfile
 
+      - name: Test
+        run: bun test
+
       - name: Build Project
         run: bun run build
 
-      # --- RELEASE STEP ---
+      - name: Check whether this version is already published
+        id: registry
+        run: |
+          node --input-type=module <<'NODE'
+          import fs from 'node:fs';
+          const { name, version } = JSON.parse(fs.readFileSync('package.json', 'utf8'));
+          const response = await fetch(`https://registry.npmjs.org/${encodeURIComponent(name)}/${version}`);
+          if (!response.ok && response.status !== 404) {
+            throw new Error(`npm registry check failed: ${response.status}`);
+          }
+          fs.appendFileSync(process.env.GITHUB_OUTPUT, `published=${response.ok}\n`);
+          NODE
+
+      # npm trusts this repository's release.yml; no NPM_TOKEN secret is needed.
+      - name: Publish to npm
+        if: steps.registry.outputs.published != 'true'
+        run: npm publish --access public
+
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ inputs.tag || github.ref_name }}
           generate_release_notes: true
           make_latest: true
-          fail_on_unmatched_files: false 
-
-      # --- PUBLISH STEP ---
-      - name: Publish to NPM
-        run: npm publish
-        env:
-          NODE_AUTH_TOKEN: ${{ secrets.NPM_TOKEN }}
+          fail_on_unmatched_files: false
