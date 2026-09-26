@@ -6,7 +6,7 @@
   "author": "imlokesh",
   "type": "module",
   "bin": {
-    "easy-hevc": "./dist/index.js"
+    "easy-hevc": "dist/index.js"
   },
   "files": [
     "dist"
