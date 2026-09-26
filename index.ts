@@ -7,16 +7,18 @@
  */
 
 import { spawn } from "node:child_process";
-import { constants } from "node:fs";
+import { constants, realpathSync } from "node:fs";
 import fs from "node:fs/promises";
 import path from "node:path";
 import * as readline from "node:readline";
+import { pathToFileURL } from "node:url";
 import clide from "@imlokesh/clide";
+import { checkNvidia, type EncoderOptions, encoderSettings, runFFmpeg } from "./encoder";
 
 // --- Types & Interfaces ---
 
 /** Supported resolutions for video downscaling */
-enum Resolution {
+export enum Resolution {
   R4K = "2160",
   R2K = "1440",
   R1080 = "1080",
@@ -27,7 +29,7 @@ enum Resolution {
 }
 
 /** CLI options for the `convert` command */
-interface ConversionOptions {
+export interface ConversionOptions extends EncoderOptions {
   /** Input directory or file path */
   input: string;
   /** Suffix to append to converted files (e.g., "_hevc") */
@@ -37,7 +39,7 @@ interface ConversionOptions {
   /** Constant Rate Factor (0-51). Lower is better quality. */
   crf: number;
   /** FFmpeg preset (e.g., "fast", "medium", "slow") */
-  preset: string;
+  preset: EncoderOptions["preset"];
   /** If true, delete the original and rename the converted file to the original base name */
   finalize: boolean;
   /** If true, copies file modification times to the new file */
@@ -276,7 +278,8 @@ const Logger = {
 
 // --- FFmpeg Utilities ---
 
-const FFmpegService = {
+export const FFmpegService = {
+  checkNvidia,
   /** Checks if a required binary exists in PATH */
   checkBinary: (binary: string): Promise<void> => {
     return new Promise((resolve, reject) => {
@@ -371,54 +374,48 @@ const FFmpegService = {
     const originalFilename = path.basename(input);
     const startTime = Date.now();
 
-    return new Promise((resolve, reject) => {
-      const args = [
-        "-fflags",
-        "+genpts+discardcorrupt",
-        "-err_detect",
-        "ignore_err",
-        "-i",
-        input,
-        "-map",
-        "0", // Map all streams
-        "-c:v",
-        "libx265",
-        "-crf",
-        String(opts.crf),
-        "-preset",
-        opts.preset,
-        "-c:a",
-        "copy", // Passthrough audio
-        "-c:s",
-        "copy", // Passthrough subtitles
-        "-metadata",
-        `easy_hevc_original_file=${originalFilename}`,
-        "-metadata",
-        `easy_hevc_original_resolution=${inputHeight}p`,
-        "-metadata",
-        `easy_hevc_crf=${opts.crf}`,
-        "-metadata",
-        `easy_hevc_preset=${opts.preset}`,
-      ];
+    const settings = encoderSettings(opts);
+    const args = [
+      "-fflags",
+      "+genpts+discardcorrupt",
+      "-err_detect",
+      "ignore_err",
+      "-i",
+      input,
+      "-map",
+      "0", // Map all streams
+      ...settings.args,
+      "-c:a",
+      "copy", // Passthrough audio
+      "-c:s",
+      "copy", // Passthrough subtitles
+      "-metadata",
+      `easy_hevc_original_file=${originalFilename}`,
+      "-metadata",
+      `easy_hevc_original_resolution=${inputHeight}p`,
+      "-metadata",
+      `easy_hevc_${settings.qualityName}=${settings.quality}`,
+      "-metadata",
+      `easy_hevc_encoder=${settings.codec}`,
+      "-metadata",
+      `easy_hevc_preset=${settings.preset}`,
+    ];
 
-      // Evaluate resolution scaling
-      if (inputHeight > targetHeight) {
-        Logger.info(`Downscaling: ${inputHeight}p -> ${targetHeight}p`);
-        args.push("-vf", `scale=-2:${targetHeight}`);
-        args.push("-metadata", `easy_hevc_target_resolution=${targetHeight}p`);
-      } else {
-        Logger.info(`Keeping resolution: ${inputHeight || "unknown"}p`);
-        args.push("-metadata", `easy_hevc_target_resolution=${inputHeight}p (original)`);
-      }
+    // Evaluate resolution scaling
+    if (inputHeight > targetHeight) {
+      Logger.info(`Downscaling: ${inputHeight}p -> ${targetHeight}p`);
+      args.push("-vf", `scale=-2:${targetHeight}`);
+      args.push("-metadata", `easy_hevc_target_resolution=${targetHeight}p`);
+    } else {
+      Logger.info(`Keeping resolution: ${inputHeight || "unknown"}p`);
+      args.push("-metadata", `easy_hevc_target_resolution=${inputHeight}p (original)`);
+    }
 
-      args.push("-y", output); // Overwrite target if exists
+    args.push("-y", output); // Overwrite target if exists
 
-      const proc = spawn("ffmpeg", args);
-
-      // Parse stderr for progress and speed (ffmpeg sends updates to stderr)
-      proc.stderr.on("data", (chunk) => {
-        const line = chunk.toString();
-
+    // Parse stderr for progress and speed (ffmpeg sends updates to stderr)
+    try {
+      await runFFmpeg(args, (line) => {
         const timeMatch = line.match(/time=([0-9:.]+)/);
         const speedMatch = line.match(/speed=\s*([\d.]+x)/);
 
@@ -430,16 +427,10 @@ const FFmpegService = {
           Logger.progress(progressStr);
         }
       });
-
-      proc.on("close", (code) => {
-        Logger.clearLine();
-        const endTime = Date.now();
-        if (code === 0) resolve(endTime - startTime);
-        else reject(new Error(`FFmpeg exited with code ${code}`));
-      });
-
-      proc.on("error", (err) => reject(err));
-    });
+    } finally {
+      Logger.clearLine();
+    }
+    return Date.now() - startTime;
   },
 };
 
@@ -511,17 +502,26 @@ const FileService = {
 
 // --- Primary Command: Convert ---
 
-const runConvert = async (opts: ConversionOptions) => {
-  Logger.header(opts.dryRun ? "Starting Video Compression (DRY RUN MODE)" : "Starting Video Compression");
+export const runConvert = async (opts: ConversionOptions) => {
+  const settings = encoderSettings(opts);
+  Logger.header(
+    opts.dryRun ? "Starting Video Compression (DRY RUN MODE)" : "Starting Video Compression",
+  );
+  Logger.info(
+    `Encoder: ${settings.codec}, ${settings.qualityName.toUpperCase()}: ${settings.quality}, preset: ${settings.preset}`,
+  );
+  if (opts.encoder === "nvidia" && opts.crf !== 24) {
+    Logger.warn("--crf / HEVC_CRF is ignored for NVIDIA encoding. Use --cq instead.");
+  }
 
   // Verify CLI dependencies
-  try {
-    for (const binary of ["ffmpeg", "ffprobe"]) {
-      await FFmpegService.checkBinary(binary);
-    }
-  } catch (e: unknown) {
-    if (e instanceof Error) Logger.error(e.message);
-    process.exit(1);
+  for (const binary of ["ffmpeg", "ffprobe"]) {
+    await FFmpegService.checkBinary(binary);
+  }
+  if (opts.encoder === "nvidia") {
+    if (opts.dryRun)
+      Logger.info("[DRY RUN] NVIDIA encoding check skipped; hardware availability is unverified.");
+    else await FFmpegService.checkNvidia(opts);
   }
 
   // Build file collection
@@ -544,7 +544,7 @@ const runConvert = async (opts: ConversionOptions) => {
     files = withSizes.map((item) => item.file);
   }
 
-  Logger.info(`Found ${files.length} files. Target: ${opts.resolution}p, CRF: ${opts.crf}`);
+  Logger.info(`Found ${files.length} files. Target: ${opts.resolution}p`);
 
   let totalSaved = 0;
   let successCount = 0;
@@ -556,14 +556,15 @@ const runConvert = async (opts: ConversionOptions) => {
     const fileInfo = path.parse(file);
     const baseName = fileInfo.name;
     const originalSize = opts.sortBySize ? fileSizes.get(file) : undefined;
-    const processingSizeLabel = originalSize === undefined ? "" : ` (${Logger.formatBytes(originalSize)})`;
+    const processingSizeLabel =
+      originalSize === undefined ? "" : ` (${Logger.formatBytes(originalSize)})`;
 
     Logger.divider();
     Logger.info(`[${i + 1}/${files.length}] Processing: ${fileInfo.base}${processingSizeLabel}`);
 
     // Pre-validation: Check duration to ensure it's a valid video file
     const originalDuration = await FFmpegService.getDuration(file);
-    if (originalDuration <= 0) {
+    if (!Number.isFinite(originalDuration) || originalDuration <= 0) {
       Logger.skip("Skipping: Invalid video file or unable to read duration.");
       continue;
     }
@@ -622,7 +623,9 @@ const runConvert = async (opts: ConversionOptions) => {
       Logger.info(`[DRY RUN] Would convert to: ${outputName}`);
       Logger.info(`[DRY RUN] Temporary file: ${tempName}`);
       if (opts.finalize) {
-        Logger.info("[DRY RUN] Would delete the original and rename the converted file if it is smaller.");
+        Logger.info(
+          "[DRY RUN] Would delete the original and rename the converted file if it is smaller.",
+        );
       }
       successCount++;
       continue;
@@ -640,7 +643,8 @@ const runConvert = async (opts: ConversionOptions) => {
       // Post-conversion validation: Compare durations to ensure completeness
       const convertedDuration = await FFmpegService.getDuration(tempPath);
 
-      if (convertedDuration <= 0) {
+      if (!Number.isFinite(convertedDuration) || convertedDuration <= 0) {
+        process.exitCode = 1;
         Logger.error("Conversion failed or resulted in 0 duration. Cleaning up temp file.");
         if (await FileService.exists(tempPath)) await fs.unlink(tempPath);
         continue;
@@ -648,7 +652,10 @@ const runConvert = async (opts: ConversionOptions) => {
         Logger.warn(
           `Duration mismatch! Original: ${Logger.formatDurationSeconds(originalDuration)}, Converted: ${Logger.formatDurationSeconds(convertedDuration)}`,
         );
-        Logger.warn("Conversion completed but with duration difference.");
+        Logger.error("Duration validation failed. Keeping original and removing temporary output.");
+        if (await FileService.exists(tempPath)) await fs.unlink(tempPath);
+        process.exitCode = 1;
+        continue;
       }
 
       if (opts.preserveDates) {
@@ -690,6 +697,7 @@ const runConvert = async (opts: ConversionOptions) => {
         }
       }
     } catch (err: unknown) {
+      process.exitCode = 1;
       if (err instanceof Error) {
         Logger.error(`Conversion Failed: ${err.message}`);
       }
@@ -990,6 +998,18 @@ const main = async () => {
             env: "HEVC_CRF",
             validate: (n: number) => (n > 0 && n < 51) || "CRF 0-51",
           },
+          encoder: {
+            type: "string",
+            choices: ["cpu", "nvidia"],
+            default: "cpu",
+            description: "HEVC encoder: CPU (libx265) or NVIDIA (NVENC)",
+          },
+          cq: {
+            type: "number",
+            description: "NVIDIA quality, integer 1-50 (default: 24); lower is higher quality",
+            validate: (n: number) =>
+              (Number.isInteger(n) && n >= 1 && n <= 50) || "CQ must be an integer from 1 to 50",
+          },
           preset: {
             type: "string",
             default: "medium",
@@ -999,7 +1019,8 @@ const main = async () => {
           finalize: {
             type: "boolean",
             default: false,
-            description: "Delete the original and rename the converted file to the original base name if smaller",
+            description:
+              "Delete the original and rename the converted file to the original base name if smaller",
           },
           "preserve-dates": {
             type: "boolean",
@@ -1052,7 +1073,9 @@ const main = async () => {
       suffix: commandOptions.suffix as string,
       resolution: commandOptions.resolution as Resolution,
       crf: commandOptions.crf as number,
-      preset: commandOptions.preset as string,
+      encoder: commandOptions.encoder as EncoderOptions["encoder"],
+      cq: commandOptions.cq as number | undefined,
+      preset: commandOptions.preset as EncoderOptions["preset"],
       finalize: commandOptions.finalize as boolean,
       preserveDates: commandOptions["preserve-dates"] as boolean,
       sortBySize: commandOptions["sort-by-size"] as boolean,
@@ -1067,4 +1090,9 @@ const main = async () => {
   }
 };
 
-main();
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
+  main().catch((err: unknown) => {
+    Logger.error(err instanceof Error ? err.message : String(err));
+    process.exitCode = 1;
+  });
+}
