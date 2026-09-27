@@ -14,6 +14,7 @@ import * as readline from "node:readline";
 import { pathToFileURL } from "node:url";
 import clide from "@imlokesh/clide";
 import { checkNvidia, type EncoderOptions, encoderSettings, runFFmpeg } from "./encoder";
+import { version } from "./package.json";
 
 // --- Types & Interfaces ---
 
@@ -966,11 +967,11 @@ const runFinalize = async (opts: FinalizeOptions) => {
 const main = async () => {
   // Initialize CLI framework
   const { command, commandOptions } = await clide({
-    description: "easy-hevc - A CLI tool to batch convert video files to HEVC (H.265) format.",
+    description: `easy-hevc v${version} - A CLI tool to batch convert video files to HEVC (H.265) format.`,
     defaultCommand: "convert",
     commands: {
       convert: {
-        description: "Convert videos to HEVC/H.265",
+        description: `easy-hevc v${version} - Convert videos to HEVC/H.265`,
         options: {
           input: {
             type: "string",
@@ -1042,7 +1043,7 @@ const main = async () => {
         },
       },
       finalize: {
-        description: "Delete originals and rename converted files to replace them.",
+        description: `easy-hevc v${version} - Delete originals and rename converted files to replace them.`,
         options: {
           input: {
             type: "string",
